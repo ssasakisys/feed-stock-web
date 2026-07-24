@@ -1,0 +1,741 @@
+"use client";
+
+import { useState, useEffect, useCallback, useMemo } from "react";
+import {
+  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
+  ResponsiveContainer, ReferenceDot,
+} from "recharts";
+import {
+  Plus, Trash2, ChevronLeft, ChevronUp, ChevronDown, AlertTriangle, CalendarPlus,
+  Warehouse, Package, X, Gauge, Download, Settings2, Home as HomeIcon,
+} from "lucide-react";
+import { supabase } from "../lib/supabaseClient";
+
+const GAUGE_MAX_DAYS = 30;
+
+const COLORS = {
+  bg: "#161B22", panel: "#1E2530", panelAlt: "#252D3A", border: "#333F4F",
+  text: "#EDEBE2", textDim: "#9AA5B1", sage: "#7C9A82", amber: "#D9A544",
+  rust: "#C1502E", gray: "#5B6572", steel: "#5C7C99",
+};
+
+function uid() { return Math.random().toString(36).slice(2, 10); }
+function todayStr() { return new Date().toISOString().slice(0, 10); }
+function daysBetween(d1, d2) { return Math.round((new Date(d2) - new Date(d1)) / 86400000); }
+function fmtDate(d) { const dt = new Date(d); return `${dt.getMonth() + 1}/${dt.getDate()}`; }
+function fmtDateFull(d) { const dt = new Date(d); return `${dt.getFullYear()}/${dt.getMonth() + 1}/${dt.getDate()}`; }
+function sortedLogs(stock) { return [...(stock.logs || [])].sort((a, b) => new Date(a.date) - new Date(b.date)); }
+
+function computeDailyUsage(stock) {
+  if (stock.use_manual && stock.manual_daily_usage != null && stock.manual_daily_usage > 0) {
+    return { value: stock.manual_daily_usage, source: "manual" };
+  }
+  const logs = sortedLogs(stock);
+  for (let i = logs.length - 1; i >= 1; i--) {
+    const prev = logs[i - 1];
+    const last = logs[i];
+    const days = daysBetween(prev.date, last.date);
+    const used = prev.remaining - last.remaining;
+    if (days > 0 && used >= 0) {
+      return { value: used / days, source: "calc" };
+    }
+  }
+  if (stock.manual_daily_usage != null && stock.manual_daily_usage > 0) {
+    return { value: stock.manual_daily_usage, source: "manual" };
+  }
+  return { value: null, source: logs.length < 2 ? "none" : "invalid" };
+}
+
+function computeDaysLeft(stock) {
+  const logs = sortedLogs(stock);
+  const latest = logs[logs.length - 1];
+  const usage = computeDailyUsage(stock);
+  if (!latest || !usage.value || usage.value <= 0) return null;
+  return latest.remaining / usage.value;
+}
+
+function computeStockoutDate(stock) {
+  const logs = sortedLogs(stock);
+  const latest = logs[logs.length - 1];
+  const daysLeft = computeDaysLeft(stock);
+  if (!latest || daysLeft == null) return null;
+  const d = new Date(latest.date);
+  d.setDate(d.getDate() + Math.floor(daysLeft));
+  return d.toISOString().slice(0, 10);
+}
+
+function getStatus(daysLeft) {
+  if (daysLeft == null) return "unknown";
+  if (daysLeft <= 3) return "critical";
+  if (daysLeft <= 7) return "warning";
+  return "ok";
+}
+
+const STATUS_COLOR = { critical: COLORS.rust, warning: COLORS.amber, ok: COLORS.sage, unknown: COLORS.gray };
+const STATUS_LABEL = { critical: "危険", warning: "注意", ok: "正常", unknown: "算出不可" };
+
+function gcalUrl(title, dateStr, details) {
+  const d = new Date(dateStr);
+  const end = new Date(d);
+  end.setDate(end.getDate() + 1);
+  const fmt = (dt) => dt.toISOString().slice(0, 10).replace(/-/g, "");
+  const params = new URLSearchParams({ action: "TEMPLATE", text: title, dates: `${fmt(d)}/${fmt(end)}`, details: details || "" });
+  return `https://calendar.google.com/calendar/render?${params.toString()}`;
+}
+
+function downloadIcs(items) {
+  const toIcsDate = (dateStr) => dateStr.replace(/-/g, "");
+  let body = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//feed-inventory//JP\r\nCALSCALE:GREGORIAN\r\n";
+  items.forEach((it) => {
+    const dt = new Date(it.alertDate);
+    const end = new Date(dt);
+    end.setDate(end.getDate() + 1);
+    body += "BEGIN:VEVENT\r\n";
+    body += `UID:${uid()}@feed-inventory\r\n`;
+    body += `DTSTAMP:${new Date().toISOString().replace(/[-:]/g, "").split(".")[0]}Z\r\n`;
+    body += `DTSTART;VALUE=DATE:${toIcsDate(it.alertDate)}\r\n`;
+    body += `DTEND;VALUE=DATE:${toIcsDate(end.toISOString().slice(0, 10))}\r\n`;
+    body += `SUMMARY:${it.title}\r\n`;
+    body += `DESCRIPTION:${it.details || ""}\r\n`;
+    body += "END:VEVENT\r\n";
+  });
+  body += "END:VCALENDAR\r\n";
+  const blob = new Blob([body], { type: "text/calendar;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = "inventory-alerts.ics";
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function Gauge_({ daysLeft, status }) {
+  const pct = daysLeft == null ? 0 : Math.max(4, Math.min(100, (daysLeft / GAUGE_MAX_DAYS) * 100));
+  const color = STATUS_COLOR[status];
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 4, minWidth: 120 }}>
+      <div style={{ position: "relative", height: 10, borderRadius: 3, background: "#11151B", border: `1px solid ${COLORS.border}`, overflow: "hidden" }}>
+        <div style={{ position: "absolute", inset: 0, width: `${pct}%`, background: color, transition: "width 0.4s ease" }} />
+        {[25, 50, 75].map((t) => (<div key={t} style={{ position: "absolute", left: `${t}%`, top: 0, bottom: 0, width: 1, background: "rgba(0,0,0,0.35)" }} />))}
+      </div>
+      <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, color, fontWeight: 600 }}>
+        {daysLeft == null ? "残日数 ―" : `残り ${Math.floor(daysLeft)}日`}
+      </div>
+    </div>
+  );
+}
+
+function StatusBadge({ status }) {
+  const color = STATUS_COLOR[status];
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, fontWeight: 600, padding: "3px 8px", borderRadius: 3, border: `1px solid ${color}`, color, background: `${color}1A`, textTransform: "uppercase" }}>
+      <span style={{ width: 6, height: 6, borderRadius: "50%", background: color }} />{STATUS_LABEL[status]}
+    </span>
+  );
+}
+
+function Btn({ children, onClick, variant = "default", style, ...rest }) {
+  const variants = {
+    default: { background: COLORS.panelAlt, color: COLORS.text, border: `1px solid ${COLORS.border}` },
+    primary: { background: COLORS.steel, color: "#fff", border: `1px solid ${COLORS.steel}` },
+    danger: { background: "transparent", color: COLORS.rust, border: `1px solid ${COLORS.rust}55` },
+  };
+  return (
+    <button onClick={onClick} style={{ display: "inline-flex", alignItems: "center", gap: 6, fontFamily: "'IBM Plex Sans JP', sans-serif", fontSize: 13, fontWeight: 500, padding: "7px 12px", borderRadius: 5, cursor: "pointer", ...variants[variant], ...style }} {...rest}>
+      {children}
+    </button>
+  );
+}
+
+function Field({ label, children }) {
+  return (<label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 12, color: COLORS.textDim }}>{label}{children}</label>);
+}
+
+const inputStyle = { background: "#11151B", border: `1px solid ${COLORS.border}`, borderRadius: 4, padding: "7px 9px", color: COLORS.text, fontSize: 13, fontFamily: "'IBM Plex Sans JP', sans-serif", outline: "none" };
+
+function Panel({ title, children }) {
+  return (
+    <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.border}`, borderRadius: 7, padding: 16 }}>
+      <div style={{ fontFamily: "'Oswald', sans-serif", fontSize: 13, letterSpacing: 0.5, textTransform: "uppercase", color: COLORS.textDim, marginBottom: 12 }}>{title}</div>
+      {children}
+    </div>
+  );
+}
+
+function Empty({ text }) { return (<div style={{ color: COLORS.textDim, fontSize: 13, padding: "16px 0", fontStyle: "italic" }}>{text}</div>); }
+
+function StatCard({ label, value, color }) {
+  return (
+    <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.border}`, borderRadius: 7, padding: "14px 16px", flex: 1, minWidth: 130 }}>
+      <div style={{ fontSize: 11, color: COLORS.textDim, textTransform: "uppercase" }}>{label}</div>
+      <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 26, fontWeight: 600, color: color || COLORS.text, marginTop: 4 }}>{value}</div>
+    </div>
+  );
+}
+
+// ------------------------------------------------------------------
+// メインアプリ
+// ------------------------------------------------------------------
+export default function App() {
+  const [data, setData] = useState({ farms: [], products: [], stocks: [] });
+  const [loading, setLoading] = useState(true);
+  const [tab, setTab] = useState("home");
+  const [selectedStockId, setSelectedStockId] = useState(null);
+  const [leadDays, setLeadDays] = useState(3);
+  const [filterStatus, setFilterStatus] = useState("all");
+  const [error, setError] = useState(null);
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [farmsRes, productsRes, stocksRes] = await Promise.all([
+        supabase.from("farms").select("*").order("region").order("order_num"),
+        supabase.from("products").select("*").order("name"),
+        supabase.from("stocks").select("*, logs(*)"),
+      ]);
+      if (farmsRes.error) throw farmsRes.error;
+      if (productsRes.error) throw productsRes.error;
+      if (stocksRes.error) throw stocksRes.error;
+      setData({ farms: farmsRes.data || [], products: productsRes.data || [], stocks: stocksRes.data || [] });
+      setError(null);
+    } catch (e) {
+      setError("データ取得エラー: " + e.message);
+    }
+    setLoading(false);
+  }, []);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  const farmName = (id) => data.farms.find((f) => f.id === id)?.name || "?";
+  const productInfo = (id) => data.products.find((p) => p.id === id) || { name: "?", unit: "" };
+
+  const enrichedStocks = useMemo(() => {
+    return data.stocks.map((s) => {
+      const daysLeft = computeDaysLeft(s);
+      const status = getStatus(daysLeft);
+      const usage = computeDailyUsage(s);
+      const stockoutDate = computeStockoutDate(s);
+      const logs = sortedLogs(s);
+      const latest = logs[logs.length - 1];
+      let projectedRemaining = null;
+      if (latest) {
+        if (!usage.value) projectedRemaining = latest.remaining;
+        else {
+          const daysSince = daysBetween(latest.date, todayStr());
+          projectedRemaining = daysSince <= 0 ? latest.remaining : Math.max(0, latest.remaining - usage.value * daysSince);
+        }
+      }
+      return { ...s, daysLeft, status, usage, stockoutDate, latest, projectedRemaining };
+    });
+  }, [data.stocks]);
+
+  const sortedByUrgency = useMemo(() => {
+    const rank = { critical: 0, warning: 1, unknown: 2, ok: 3 };
+    return [...enrichedStocks].sort((a, b) => {
+      if (rank[a.status] !== rank[b.status]) return rank[a.status] - rank[b.status];
+      if (a.daysLeft == null) return 1;
+      if (b.daysLeft == null) return -1;
+      return a.daysLeft - b.daysLeft;
+    });
+  }, [enrichedStocks]);
+
+  const alertItems = useMemo(() => sortedByUrgency.filter((s) => s.daysLeft != null && s.daysLeft <= leadDays + 7), [sortedByUrgency, leadDays]);
+
+  if (loading && data.farms.length === 0 && data.products.length === 0) {
+    return <div style={{ minHeight: "100vh", background: COLORS.bg, color: COLORS.textDim, display: "flex", alignItems: "center", justifyContent: "center" }}>読み込み中...</div>;
+  }
+
+  // ---- Actions ----
+  const addFarm = async (name, note = "", region = "") => {
+    if (!name.trim()) return;
+    const regionKey = region.trim();
+    const maxOrder = data.farms.filter((f) => (f.region || "") === regionKey).reduce((m, f) => Math.max(m, f.order_num ?? 0), -1);
+    await supabase.from("farms").insert({ name: name.trim(), note: note.trim(), region: regionKey, order_num: maxOrder + 1 });
+    await refresh();
+  };
+
+  const addFarmsBulk = async (list) => {
+    let added = 0, updated = 0;
+    const orderCounters = {};
+    data.farms.forEach((f) => { const r = f.region || ""; orderCounters[r] = Math.max(orderCounters[r] ?? -1, f.order_num ?? 0); });
+    for (const item of list) {
+      const name = (item.name || "").trim();
+      if (!name) continue;
+      const note = (item.note || "").trim();
+      const region = (item.region || "").trim();
+      const existing = data.farms.find((f) => f.name.trim().toLowerCase() === name.toLowerCase());
+      if (existing) {
+        const patch = {};
+        if (note && note !== existing.note) patch.note = note;
+        if (region && region !== existing.region) patch.region = region;
+        if (Object.keys(patch).length > 0) {
+          await supabase.from("farms").update(patch).eq("id", existing.id);
+          updated++;
+        }
+        continue;
+      }
+      orderCounters[region] = (orderCounters[region] ?? -1) + 1;
+      await supabase.from("farms").insert({ name, note, region, order_num: orderCounters[region] });
+      added++;
+    }
+    await refresh();
+    return { added, updated, skipped: list.length - added - updated };
+  };
+
+  const moveFarm = async (farmId, direction) => {
+    const farm = data.farms.find((f) => f.id === farmId);
+    if (!farm) return;
+    const region = farm.region || "";
+    const group = data.farms.filter((f) => (f.region || "") === region).sort((a, b) => (a.order_num ?? 0) - (b.order_num ?? 0));
+    const idx = group.findIndex((f) => f.id === farmId);
+    const swapIdx = direction === "up" ? idx - 1 : idx + 1;
+    if (swapIdx < 0 || swapIdx >= group.length) return;
+    const a = group[idx], b = group[swapIdx];
+    await Promise.all([
+      supabase.from("farms").update({ order_num: b.order_num ?? swapIdx }).eq("id", a.id),
+      supabase.from("farms").update({ order_num: a.order_num ?? idx }).eq("id", b.id),
+    ]);
+    await refresh();
+  };
+
+  const deleteFarm = async (id) => { await supabase.from("farms").delete().eq("id", id); if (selectedStockId) setSelectedStockId(null); await refresh(); };
+
+  const addProduct = async (name, unit) => {
+    if (!name.trim()) return;
+    await supabase.from("products").insert({ name: name.trim(), unit: unit.trim() || "個" });
+    await refresh();
+  };
+  const deleteProduct = async (id) => { await supabase.from("products").delete().eq("id", id); await refresh(); };
+
+  const addStock = async (farmIdVal, productId, initialRemaining, initialDate) => {
+    if (!farmIdVal || !productId) return;
+    const { data: inserted, error } = await supabase.from("stocks").insert({ farm_id: farmIdVal, product_id: productId }).select().single();
+    if (error) { await refresh(); return; }
+    if (initialRemaining !== "" && initialRemaining != null) {
+      await supabase.from("logs").insert({ stock_id: inserted.id, date: initialDate || todayStr(), remaining: Number(initialRemaining) });
+    }
+    await refresh();
+  };
+  const deleteStock = async (id) => { await supabase.from("stocks").delete().eq("id", id); if (selectedStockId === id) setSelectedStockId(null); await refresh(); };
+
+  const addLog = async (stockId, date, remaining) => {
+    await supabase.from("logs").insert({ stock_id: stockId, date, remaining: Number(remaining) });
+    await refresh();
+  };
+  const deleteLog = async (logId) => { await supabase.from("logs").delete().eq("id", logId); await refresh(); };
+  const updateManual = async (stockId, useManual, manualDailyUsage) => {
+    await supabase.from("stocks").update({ use_manual: useManual, manual_daily_usage: manualDailyUsage }).eq("id", stockId);
+    await refresh();
+  };
+
+  const selectedStock = enrichedStocks.find((s) => s.id === selectedStockId);
+
+  return (
+    <div style={{ fontFamily: "'IBM Plex Sans JP', sans-serif", background: COLORS.bg, color: COLORS.text, minHeight: "100vh" }}>
+      <div style={{ padding: "16px 20px", borderBottom: `1px solid ${COLORS.border}`, display: "flex", alignItems: "center", justifyContent: "space-between", background: COLORS.panel, flexWrap: "wrap", gap: 10 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{ width: 30, height: 30, borderRadius: 6, background: COLORS.sage, display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <Gauge size={17} color="#11151B" />
+          </div>
+          <div>
+            <div style={{ fontFamily: "'Oswald', sans-serif", fontSize: 17, fontWeight: 600 }}>FEED STOCK GAUGE</div>
+            <div style={{ fontSize: 11, color: COLORS.textDim }}>飼料在庫管理</div>
+          </div>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+          <nav style={{ display: "flex", gap: 4 }}>
+            {[["home", "ホーム", HomeIcon], ["farms", "農家", Warehouse], ["products", "商品", Package], ["alerts", "アラート", AlertTriangle]].map(([key, label, Icon]) => (
+              <button key={key} onClick={() => { setTab(key); setSelectedStockId(null); }} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: "none", cursor: "pointer", padding: "8px 12px", borderRadius: 5, color: tab === key ? COLORS.text : COLORS.textDim, borderBottom: tab === key ? `2px solid ${COLORS.sage}` : "2px solid transparent", fontSize: 13, fontWeight: 500 }}>
+                <Icon size={15} /> {label}
+              </button>
+            ))}
+          </nav>
+        </div>
+      </div>
+
+      <div style={{ padding: 20, maxWidth: 1100, margin: "0 auto" }}>
+        {error && <div style={{ color: COLORS.rust, fontSize: 12, marginBottom: 10 }}>{error}</div>}
+        {loading && <div style={{ color: COLORS.textDim, fontSize: 12, marginBottom: 10 }}>読み込み中...</div>}
+
+        {tab === "home" && !selectedStockId && (
+          <HomeView enrichedStocks={sortedByUrgency} farmName={farmName} productInfo={productInfo} filterStatus={filterStatus} setFilterStatus={setFilterStatus} onSelect={(id) => { setSelectedStockId(id); setTab("detail"); }} />
+        )}
+        {tab === "detail" && selectedStock && (
+          <DetailView stock={selectedStock} farmName={farmName(selectedStock.farm_id)} product={productInfo(selectedStock.product_id)} onBack={() => { setTab("home"); setSelectedStockId(null); }} onAddLog={addLog} onDeleteLog={deleteLog} onUpdateManual={updateManual} onDeleteStock={deleteStock} />
+        )}
+        {tab === "farms" && (
+          <FarmsView data={data} enrichedStocks={enrichedStocks} onAddFarm={addFarm} onAddFarmsBulk={addFarmsBulk} onDeleteFarm={deleteFarm} onMoveFarm={moveFarm} onAddStock={addStock} onDeleteStock={deleteStock} onSelect={(id) => { setSelectedStockId(id); setTab("detail"); }} />
+        )}
+        {tab === "products" && (<ProductsView data={data} onAddProduct={addProduct} onDeleteProduct={deleteProduct} />)}
+        {tab === "alerts" && (<AlertsView items={alertItems} farmName={farmName} productInfo={productInfo} leadDays={leadDays} setLeadDays={setLeadDays} />)}
+      </div>
+    </div>
+  );
+}
+
+function HomeView({ enrichedStocks, farmName, productInfo, filterStatus, setFilterStatus, onSelect }) {
+  const critical = enrichedStocks.filter((s) => s.status === "critical").length;
+  const warning = enrichedStocks.filter((s) => s.status === "warning").length;
+  const filtered = filterStatus === "all" ? enrichedStocks : enrichedStocks.filter((s) => s.status === filterStatus);
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+        <StatCard label="危険 (3日以内)" value={critical} color={COLORS.rust} />
+        <StatCard label="注意 (7日以内)" value={warning} color={COLORS.amber} />
+      </div>
+      <div>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+          <div style={{ fontFamily: "'Oswald', sans-serif", fontSize: 14, color: COLORS.textDim, textTransform: "uppercase" }}>農家全体の在庫状況（切れそうな順）</div>
+          <div style={{ display: "flex", gap: 6 }}>
+            {["all", "critical", "warning", "ok", "unknown"].map((k) => (
+              <button key={k} onClick={() => setFilterStatus(k)} style={{ fontSize: 11, padding: "4px 9px", borderRadius: 4, cursor: "pointer", background: filterStatus === k ? COLORS.panelAlt : "transparent", border: `1px solid ${COLORS.border}`, color: COLORS.textDim }}>
+                {k === "all" ? "すべて" : STATUS_LABEL[k]}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {filtered.length === 0 && <Empty text="該当する在庫アイテムがありません" />}
+          {filtered.map((s) => (
+            <div key={s.id} onClick={() => onSelect(s.id)} style={{ background: COLORS.panel, border: `1px solid ${COLORS.border}`, borderRadius: 7, padding: "12px 16px", display: "flex", alignItems: "center", gap: 16, cursor: "pointer" }}>
+              <div style={{ width: 140, flexShrink: 0 }}>
+                <div style={{ fontWeight: 600, fontSize: 14 }}>{farmName(s.farm_id)}</div>
+                <div style={{ fontSize: 12, color: COLORS.textDim }}>{productInfo(s.product_id).name}</div>
+              </div>
+              <div style={{ flex: 1 }}><Gauge_ daysLeft={s.daysLeft} status={s.status} /></div>
+              <div style={{ width: 100, textAlign: "right" }}>
+                <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, color: COLORS.textDim }}>{s.latest ? `${Math.round(s.projectedRemaining)}${productInfo(s.product_id).unit}` : "記録なし"}</div>
+                {s.latest && <div style={{ fontSize: 10, color: COLORS.textDim }}>本日予想</div>}
+              </div>
+              <div style={{ width: 90 }}><StatusBadge status={s.status} /></div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DetailView({ stock, farmName, product, onBack, onAddLog, onDeleteLog, onUpdateManual, onDeleteStock }) {
+  const [date, setDate] = useState(todayStr());
+  const [remaining, setRemaining] = useState("");
+  const [manualInput, setManualInput] = useState(stock.manual_daily_usage ?? "");
+  const [useManual, setUseManualLocal] = useState(stock.use_manual);
+
+  const logs = sortedLogs(stock);
+  const chartData = logs.map((l) => ({ date: fmtDate(l.date), remaining: l.remaining }));
+  if (stock.stockoutDate) chartData.push({ date: fmtDate(stock.stockoutDate), remaining: 0 });
+
+  const submitLog = () => { if (remaining === "" || isNaN(Number(remaining))) return; onAddLog(stock.id, date, remaining); setRemaining(""); };
+  const submitManual = () => onUpdateManual(stock.id, useManual, manualInput === "" ? null : Number(manualInput));
+
+  const calendarLink = stock.stockoutDate
+    ? gcalUrl(`【在庫アラート】${farmName} / ${product.name}`, stock.stockoutDate, `在庫が切れる見込みです。（自動計算: 1日${stock.usage.value ? stock.usage.value.toFixed(2) : "?"}${product.unit}使用）`)
+    : null;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <button onClick={onBack} style={{ background: "transparent", border: "none", color: COLORS.textDim, cursor: "pointer", display: "flex", alignItems: "center", gap: 5, fontSize: 13 }}>
+          <ChevronLeft size={16} /> ホームに戻る
+        </button>
+        <Btn variant="danger" onClick={() => { if (confirm("この在庫アイテムを削除しますか？")) onDeleteStock(stock.id); }}><Trash2 size={13} /> このアイテムを削除</Btn>
+      </div>
+      <div style={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between", flexWrap: "wrap", gap: 10 }}>
+        <div>
+          <div style={{ fontSize: 12, color: COLORS.textDim }}>{farmName}</div>
+          <div style={{ fontFamily: "'Oswald', sans-serif", fontSize: 24, fontWeight: 600 }}>{product.name}</div>
+        </div>
+        <StatusBadge status={stock.status} />
+      </div>
+      <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+        <StatCard label="現在の残数" value={stock.latest ? `${stock.latest.remaining}${product.unit}` : "―"} />
+        <StatCard label="1日の使用量" value={stock.usage.value ? `${stock.usage.value.toFixed(2)}${product.unit}` : "―"} />
+        <StatCard label="在庫切れ予測日" value={stock.stockoutDate ? fmtDateFull(stock.stockoutDate) : "―"} color={STATUS_COLOR[stock.status]} />
+      </div>
+      {chartData.length >= 2 && (
+        <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.border}`, borderRadius: 7, padding: 14, height: 220 }}>
+          <ResponsiveContainer width="100%" height="100%">
+            <LineChart data={chartData}>
+              <CartesianGrid stroke={COLORS.border} strokeDasharray="3 3" />
+              <XAxis dataKey="date" stroke={COLORS.textDim} tick={{ fontSize: 11 }} />
+              <YAxis stroke={COLORS.textDim} tick={{ fontSize: 11 }} />
+              <Tooltip contentStyle={{ background: COLORS.panelAlt, border: `1px solid ${COLORS.border}`, fontSize: 12 }} />
+              <Line type="monotone" dataKey="remaining" stroke={COLORS.sage} strokeWidth={2} dot={{ r: 3 }} />
+              {stock.stockoutDate && <ReferenceDot x={fmtDate(stock.stockoutDate)} y={0} r={5} fill={COLORS.rust} stroke="none" />}
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+      )}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+        <Panel title="残数を記録する">
+          <div style={{ display: "flex", gap: 8 }}>
+            <Field label="日付"><input type="date" value={date} onChange={(e) => setDate(e.target.value)} style={inputStyle} /></Field>
+            <Field label={`残数 (${product.unit})`}><input type="number" value={remaining} onChange={(e) => setRemaining(e.target.value)} style={inputStyle} placeholder="例: 40" /></Field>
+          </div>
+          <Btn variant="primary" onClick={submitLog} style={{ marginTop: 10 }}><Plus size={14} /> 記録を追加</Btn>
+          <div style={{ marginTop: 14 }}>
+            <table>
+              <thead><tr><th>日付</th><th>残数</th><th></th></tr></thead>
+              <tbody>
+                {logs.slice().reverse().map((l) => (
+                  <tr key={l.id}>
+                    <td>{fmtDateFull(l.date)}</td>
+                    <td style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{l.remaining}{product.unit}</td>
+                    <td><button onClick={() => onDeleteLog(l.id)} style={{ background: "transparent", border: "none", color: COLORS.textDim, cursor: "pointer" }}><X size={13} /></button></td>
+                  </tr>
+                ))}
+                {logs.length === 0 && <tr><td colSpan={3} style={{ color: COLORS.textDim, fontStyle: "italic" }}>記録がありません</td></tr>}
+              </tbody>
+            </table>
+          </div>
+        </Panel>
+        <Panel title="1日の使用量を手入力">
+          <div style={{ fontSize: 12, color: COLORS.textDim, marginBottom: 10 }}>通常は直近2件の記録から自動算出されます。合わない場合は手入力の値を優先できます。</div>
+          <Field label={`1日あたりの使用量 (${product.unit}/日)`}><input type="number" value={manualInput} onChange={(e) => setManualInput(e.target.value)} style={inputStyle} placeholder="例: 3.5" /></Field>
+          <label style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 10, fontSize: 12, color: COLORS.textDim, cursor: "pointer" }}>
+            <input type="checkbox" checked={useManual} onChange={(e) => setUseManualLocal(e.target.checked)} /> 自動計算より手入力の値を優先する
+          </label>
+          <Btn onClick={submitManual} style={{ marginTop: 10 }}><Settings2 size={13} /> 設定を保存</Btn>
+          <div style={{ marginTop: 18, paddingTop: 14, borderTop: `1px solid ${COLORS.border}` }}>
+            <div style={{ fontSize: 12, color: COLORS.textDim, marginBottom: 8 }}>在庫切れ予測日をカレンダーに追加</div>
+            {calendarLink ? (<a href={calendarLink} target="_blank" rel="noopener noreferrer"><Btn variant="primary"><CalendarPlus size={14} /> Googleカレンダーに追加</Btn></a>) : (<div style={{ fontSize: 12, color: COLORS.textDim, fontStyle: "italic" }}>予測に必要な記録がまだありません</div>)}
+          </div>
+        </Panel>
+      </div>
+    </div>
+  );
+}
+
+function FarmsView({ data, enrichedStocks, onAddFarm, onAddFarmsBulk, onDeleteFarm, onMoveFarm, onAddStock, onDeleteStock, onSelect }) {
+  const [newFarm, setNewFarm] = useState("");
+  const [newRegion, setNewRegion] = useState("");
+  const [openFarmId, setOpenFarmId] = useState(null);
+  const [productSel, setProductSel] = useState("");
+  const [initRemaining, setInitRemaining] = useState("");
+  const [initDate, setInitDate] = useState(todayStr());
+
+  const grouped = useMemo(() => {
+    const map = new Map();
+    data.farms.forEach((f) => {
+      const region = (f.region || "").trim() || "地域未設定";
+      if (!map.has(region)) map.set(region, []);
+      map.get(region).push(f);
+    });
+    map.forEach((list) => list.sort((a, b) => (a.order_num ?? 0) - (b.order_num ?? 0)));
+    const regions = Array.from(map.keys()).sort((a, b) => (a === "地域未設定" ? 1 : b === "地域未設定" ? -1 : a.localeCompare(b, "ja")));
+    return regions.map((region) => ({ region, farms: map.get(region) }));
+  }, [data.farms]);
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <Panel title="農家を追加">
+        <div style={{ display: "flex", gap: 8 }}>
+          <input value={newFarm} onChange={(e) => setNewFarm(e.target.value)} placeholder="農家名（例: 山田牧場）" style={{ ...inputStyle, flex: 2 }} />
+          <input value={newRegion} onChange={(e) => setNewRegion(e.target.value)} placeholder="地域（例: 帯広地区）" style={{ ...inputStyle, flex: 1 }} />
+          <Btn variant="primary" onClick={() => { onAddFarm(newFarm, "", newRegion); setNewFarm(""); setNewRegion(""); }}><Plus size={14} /> 追加</Btn>
+        </div>
+      </Panel>
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+        {data.farms.length === 0 && <Empty text="農家が登録されていません" />}
+        {grouped.map(({ region, farms }) => (
+          <div key={region}>
+            <div style={{ fontFamily: "'Oswald', sans-serif", fontSize: 13, color: COLORS.textDim, marginBottom: 8 }}>
+              {region} <span style={{ fontSize: 11, fontWeight: 400 }}>（{farms.length}軒）</span>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {farms.map((f, i) => {
+                const items = enrichedStocks.filter((s) => s.farm_id === f.id);
+                const open = openFarmId === f.id;
+                return (
+                  <div key={f.id} style={{ background: COLORS.panel, border: `1px solid ${COLORS.border}`, borderRadius: 7, padding: 14 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        <div style={{ display: "flex", flexDirection: "column" }}>
+                          <button onClick={() => onMoveFarm(f.id, "up")} disabled={i === 0} style={{ background: "transparent", border: "none", cursor: i === 0 ? "default" : "pointer", color: i === 0 ? COLORS.border : COLORS.textDim, padding: 0, lineHeight: 0 }}><ChevronUp size={14} /></button>
+                          <button onClick={() => onMoveFarm(f.id, "down")} disabled={i === farms.length - 1} style={{ background: "transparent", border: "none", cursor: i === farms.length - 1 ? "default" : "pointer", color: i === farms.length - 1 ? COLORS.border : COLORS.textDim, padding: 0, lineHeight: 0 }}><ChevronDown size={14} /></button>
+                        </div>
+                        <div onClick={() => setOpenFarmId(open ? null : f.id)} style={{ cursor: "pointer" }}>
+                          <div style={{ fontWeight: 600, fontSize: 14 }}>{f.name} <span style={{ color: COLORS.textDim, fontSize: 12, fontWeight: 400 }}>（{items.length}品目）</span></div>
+                          {f.note && <div style={{ fontSize: 11, color: COLORS.textDim, marginTop: 2 }}>{f.note}</div>}
+                        </div>
+                      </div>
+                      <Btn variant="danger" onClick={() => { if (confirm(`${f.name} を削除しますか？関連する在庫データも削除されます。`)) onDeleteFarm(f.id); }}><Trash2 size={13} /></Btn>
+                    </div>
+                    {open && (
+                      <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid ${COLORS.border}`, display: "flex", flexDirection: "column", gap: 8 }}>
+                        {items.map((s) => {
+                          const p = data.products.find((pp) => pp.id === s.product_id);
+                          return (
+                            <div key={s.id} style={{ display: "flex", alignItems: "center", gap: 12, fontSize: 13 }}>
+                              <div style={{ width: 110 }}>{p?.name}</div>
+                              <div style={{ flex: 1 }}><Gauge_ daysLeft={s.daysLeft} status={s.status} /></div>
+                              <StatusBadge status={s.status} />
+                              <button onClick={() => onSelect(s.id)} style={{ background: "transparent", border: "none", color: COLORS.steel, cursor: "pointer", fontSize: 12 }}>詳細</button>
+                              <button onClick={() => onDeleteStock(s.id)} style={{ background: "transparent", border: "none", color: COLORS.textDim, cursor: "pointer" }}><X size={13} /></button>
+                            </div>
+                          );
+                        })}
+                        <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
+                          <select value={productSel} onChange={(e) => setProductSel(e.target.value)} style={{ ...inputStyle, flex: 1 }}>
+                            <option value="">商品を選択して追加...</option>
+                            {data.products.filter((p) => !items.some((i) => i.product_id === p.id)).map((p) => (<option key={p.id} value={p.id}>{p.name}</option>))}
+                          </select>
+                          <input type="number" placeholder="初期残数(任意)" value={initRemaining} onChange={(e) => setInitRemaining(e.target.value)} style={{ ...inputStyle, width: 130 }} />
+                          <input type="date" value={initDate} onChange={(e) => setInitDate(e.target.value)} style={{ ...inputStyle, width: 140 }} />
+                          <Btn variant="primary" onClick={() => { onAddStock(f.id, productSel, initRemaining, initDate); setProductSel(""); setInitRemaining(""); setInitDate(todayStr()); }}><Plus size={13} /> 割当</Btn>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <CsvImportPanel onImport={onAddFarmsBulk} />
+    </div>
+  );
+}
+
+function CsvImportPanel({ onImport }) {
+  const [rows, setRows] = useState([]);
+  const [headers, setHeaders] = useState([]);
+  const [nameCol, setNameCol] = useState("");
+  const [noteCol, setNoteCol] = useState("");
+  const [regionCol, setRegionCol] = useState("");
+  const [fileName, setFileName] = useState("");
+  const [result, setResult] = useState(null);
+  const [parseError, setParseError] = useState("");
+
+  const parseCsv = (text) => {
+    const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
+    if (lines.length === 0) return { fields: [], rows: [] };
+    const splitLine = (line) => line.split(",").map((s) => s.trim().replace(/^"|"$/g, ""));
+    const fields = splitLine(lines[0]);
+    const rows = lines.slice(1).map((line) => {
+      const cells = splitLine(line);
+      const obj = {};
+      fields.forEach((f, i) => { obj[f] = cells[i] ?? ""; });
+      return obj;
+    });
+    return { fields, rows };
+  };
+
+  const handleFile = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    setFileName(file.name); setResult(null); setParseError("");
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const { fields, rows } = parseCsv(ev.target.result);
+      if (rows.length === 0) { setParseError("データを読み取れませんでした。1行目に見出し行があるCSVを指定してください。"); return; }
+      setHeaders(fields); setRows(rows);
+      const guessName = fields.find((h) => /名|farm|name|顧客|牧場/i.test(h));
+      const guessRegion = fields.find((h) => /地域|エリア|region|area|地区/i.test(h));
+      setNameCol(guessName || fields[0] || ""); setRegionCol(guessRegion || ""); setNoteCol("");
+    };
+    reader.readAsText(file, "UTF-8");
+  };
+
+  const preview = rows.slice(0, 5);
+  const handleImport = async () => {
+    if (!nameCol) return;
+    const list = rows.map((r) => ({ name: r[nameCol], note: noteCol ? r[noteCol] : "", region: regionCol ? r[regionCol] : "" }));
+    const res = await onImport(list);
+    setResult(res);
+  };
+
+  return (
+    <Panel title="CSVから顧客リストを取り込む">
+      <div style={{ fontSize: 12, color: COLORS.textDim, marginBottom: 10 }}>農家名の列を含むCSVファイルを選択してください（1行目は見出し）。既に登録済みの農家名（完全一致）は重複登録されず、地域・メモに新しい情報があれば更新します。</div>
+      <input type="file" accept=".csv" onChange={handleFile} style={{ fontSize: 12, color: COLORS.textDim }} />
+      {parseError && <div style={{ color: COLORS.rust, fontSize: 12, marginTop: 8 }}>{parseError}</div>}
+      {headers.length > 0 && (
+        <div style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 10 }}>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+            <Field label="農家名の列（必須）"><select value={nameCol} onChange={(e) => setNameCol(e.target.value)} style={inputStyle}>{headers.map((h) => <option key={h} value={h}>{h}</option>)}</select></Field>
+            <Field label="地域の列（任意）"><select value={regionCol} onChange={(e) => setRegionCol(e.target.value)} style={inputStyle}><option value="">（なし）</option>{headers.map((h) => <option key={h} value={h}>{h}</option>)}</select></Field>
+            <Field label="メモ列（任意）"><select value={noteCol} onChange={(e) => setNoteCol(e.target.value)} style={inputStyle}><option value="">（なし）</option>{headers.map((h) => <option key={h} value={h}>{h}</option>)}</select></Field>
+          </div>
+          <div style={{ fontSize: 12, color: COLORS.textDim }}>{fileName} : {rows.length}件を検出</div>
+          <table><thead><tr><th>農家名</th><th>地域</th><th>メモ</th></tr></thead><tbody>{preview.map((r, i) => (<tr key={i}><td>{r[nameCol] || "―"}</td><td>{regionCol ? (r[regionCol] || "―") : "―"}</td><td>{noteCol ? (r[noteCol] || "―") : "―"}</td></tr>))}</tbody></table>
+          {rows.length > 5 && <div style={{ fontSize: 11, color: COLORS.textDim }}>...他 {rows.length - 5}件</div>}
+          <Btn variant="primary" onClick={handleImport} style={{ alignSelf: "flex-start" }}><Plus size={14} /> {rows.length}件をインポート</Btn>
+          {result != null && <div style={{ fontSize: 12, color: COLORS.sage }}>新規追加 {result.added}件 / 情報更新 {result.updated}件 / 変更なし {result.skipped}件</div>}
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+function ProductsView({ data, onAddProduct, onDeleteProduct }) {
+  const [name, setName] = useState("");
+  const [unit, setUnit] = useState("袋");
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <Panel title="商品を追加">
+        <div style={{ display: "flex", gap: 8 }}>
+          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="商品名（例: 配合飼料A）" style={{ ...inputStyle, flex: 2 }} />
+          <input value={unit} onChange={(e) => setUnit(e.target.value)} placeholder="単位" style={{ ...inputStyle, width: 90 }} />
+          <Btn variant="primary" onClick={() => { onAddProduct(name, unit); setName(""); }}><Plus size={14} /> 追加</Btn>
+        </div>
+      </Panel>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {data.products.length === 0 && <Empty text="商品が登録されていません" />}
+        {data.products.map((p) => (
+          <div key={p.id} style={{ background: COLORS.panel, border: `1px solid ${COLORS.border}`, borderRadius: 7, padding: "10px 14px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <div><span style={{ fontWeight: 600 }}>{p.name}</span> <span style={{ color: COLORS.textDim, fontSize: 12 }}>（単位: {p.unit}）</span></div>
+            <Btn variant="danger" onClick={() => { if (confirm(`${p.name} を削除しますか？関連する在庫データも削除されます。`)) onDeleteProduct(p.id); }}><Trash2 size={13} /></Btn>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function AlertsView({ items, farmName, productInfo, leadDays, setLeadDays }) {
+  const urgentForCalendar = items.filter((s) => s.stockoutDate);
+  const handleBulkIcs = () => {
+    const icsItems = urgentForCalendar.map((s) => {
+      const alertDate = new Date(s.stockoutDate);
+      alertDate.setDate(alertDate.getDate() - leadDays);
+      const useDate = alertDate < new Date() ? s.stockoutDate : alertDate.toISOString().slice(0, 10);
+      return { alertDate: useDate, title: `【在庫アラート】${farmName(s.farm_id)} / ${productInfo(s.product_id).name}`, details: `在庫切れ予測日: ${fmtDateFull(s.stockoutDate)}` };
+    });
+    if (icsItems.length === 0) return;
+    downloadIcs(icsItems);
+  };
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <Panel title="アラート設定">
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <Field label="在庫切れの何日前に通知するか"><input type="number" value={leadDays} onChange={(e) => setLeadDays(Number(e.target.value))} style={{ ...inputStyle, width: 80 }} /></Field>
+          <Btn onClick={handleBulkIcs} style={{ marginTop: 18 }}><Download size={14} /> 対象アイテムを .ics で一括書き出し</Btn>
+        </div>
+      </Panel>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {items.length === 0 && <Empty text="直近で在庫切れが近いアイテムはありません" />}
+        {items.map((s) => {
+          const product = productInfo(s.product_id);
+          const link = s.stockoutDate ? gcalUrl(`【在庫アラート】${farmName(s.farm_id)} / ${product.name}`, s.stockoutDate, `在庫切れ予測日: ${fmtDateFull(s.stockoutDate)}`) : null;
+          return (
+            <div key={s.id} style={{ background: COLORS.panel, border: `1px solid ${COLORS.border}`, borderRadius: 7, padding: "12px 16px", display: "flex", alignItems: "center", gap: 16 }}>
+              <div style={{ width: 150 }}>
+                <div style={{ fontWeight: 600, fontSize: 14 }}>{farmName(s.farm_id)}</div>
+                <div style={{ fontSize: 12, color: COLORS.textDim }}>{product.name}</div>
+              </div>
+              <div style={{ flex: 1 }}><Gauge_ daysLeft={s.daysLeft} status={s.status} /></div>
+              <div style={{ fontSize: 12, color: COLORS.textDim, width: 110 }}>予測: {s.stockoutDate ? fmtDateFull(s.stockoutDate) : "―"}</div>
+              <StatusBadge status={s.status} />
+              {link && (<a href={link} target="_blank" rel="noopener noreferrer"><Btn variant="primary"><CalendarPlus size={13} /> 追加</Btn></a>)}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}

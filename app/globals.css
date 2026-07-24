@@ -1,0 +1,31 @@
+@import url('https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&family=IBM+Plex+Sans+JP:wght@400;500;700&family=IBM+Plex+Mono:wght@500;600&display=swap');
+
+:root {
+  --bg: #161B22;
+  --panel: #1E2530;
+  --panel-alt: #252D3A;
+  --border: #333F4F;
+  --text: #EDEBE2;
+  --text-dim: #9AA5B1;
+  --sage: #7C9A82;
+  --amber: #D9A544;
+  --rust: #C1502E;
+  --gray: #5B6572;
+  --steel: #5C7C99;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'IBM Plex Sans JP', sans-serif;
+}
+
+table { border-collapse: collapse; width: 100%; }
+th, td { text-align: left; padding: 8px 10px; font-size: 13px; }
+th { color: var(--text-dim); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid var(--border); }
+td { border-bottom: 1px solid #333f4f44; }
+a { color: var(--steel); }

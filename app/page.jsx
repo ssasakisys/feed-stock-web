@@ -249,7 +249,9 @@ export default function App() {
     if (!name.trim()) return;
     const regionKey = region.trim();
     const maxOrder = data.farms.filter((f) => (f.region || "") === regionKey).reduce((m, f) => Math.max(m, f.order_num ?? 0), -1);
-    await supabase.from("farms").insert({ name: name.trim(), note: note.trim(), region: regionKey, order_num: maxOrder + 1 });
+    const { error: err } = await supabase.from("farms").insert({ name: name.trim(), note: note.trim(), region: regionKey, order_num: maxOrder + 1 });
+    if (err) { setError("農家の追加に失敗: " + err.message); return; }
+    setError(null);
     await refresh();
   };
 
@@ -268,13 +270,15 @@ export default function App() {
         if (note && note !== existing.note) patch.note = note;
         if (region && region !== existing.region) patch.region = region;
         if (Object.keys(patch).length > 0) {
-          await supabase.from("farms").update(patch).eq("id", existing.id);
+          const { error: err } = await supabase.from("farms").update(patch).eq("id", existing.id);
+          if (err) { setError("農家の更新に失敗: " + err.message); continue; }
           updated++;
         }
         continue;
       }
       orderCounters[region] = (orderCounters[region] ?? -1) + 1;
-      await supabase.from("farms").insert({ name, note, region, order_num: orderCounters[region] });
+      const { error: err } = await supabase.from("farms").insert({ name, note, region, order_num: orderCounters[region] });
+      if (err) { setError("農家の追加に失敗: " + err.message); continue; }
       added++;
     }
     await refresh();
@@ -290,40 +294,73 @@ export default function App() {
     const swapIdx = direction === "up" ? idx - 1 : idx + 1;
     if (swapIdx < 0 || swapIdx >= group.length) return;
     const a = group[idx], b = group[swapIdx];
-    await Promise.all([
+    const results = await Promise.all([
       supabase.from("farms").update({ order_num: b.order_num ?? swapIdx }).eq("id", a.id),
       supabase.from("farms").update({ order_num: a.order_num ?? idx }).eq("id", b.id),
     ]);
+    const err = results.find((r) => r.error)?.error;
+    if (err) { setError("並び替えに失敗: " + err.message); return; }
+    setError(null);
     await refresh();
   };
 
-  const deleteFarm = async (id) => { await supabase.from("farms").delete().eq("id", id); if (selectedStockId) setSelectedStockId(null); await refresh(); };
+  const deleteFarm = async (id) => {
+    const { error: err } = await supabase.from("farms").delete().eq("id", id);
+    if (err) { setError("削除に失敗: " + err.message); return; }
+    setError(null);
+    if (selectedStockId) setSelectedStockId(null);
+    await refresh();
+  };
 
   const addProduct = async (name, unit) => {
     if (!name.trim()) return;
-    await supabase.from("products").insert({ name: name.trim(), unit: unit.trim() || "個" });
+    const { error: err } = await supabase.from("products").insert({ name: name.trim(), unit: unit.trim() || "個" });
+    if (err) { setError("商品の追加に失敗: " + err.message); return; }
+    setError(null);
     await refresh();
   };
-  const deleteProduct = async (id) => { await supabase.from("products").delete().eq("id", id); await refresh(); };
+  const deleteProduct = async (id) => {
+    const { error: err } = await supabase.from("products").delete().eq("id", id);
+    if (err) { setError("削除に失敗: " + err.message); return; }
+    setError(null);
+    await refresh();
+  };
 
   const addStock = async (farmIdVal, productId, initialRemaining, initialDate) => {
     if (!farmIdVal || !productId) return;
     const { data: inserted, error } = await supabase.from("stocks").insert({ farm_id: farmIdVal, product_id: productId }).select().single();
-    if (error) { await refresh(); return; }
+    if (error) { setError("商品の割当に失敗: " + error.message); await refresh(); return; }
+    setError(null);
     if (initialRemaining !== "" && initialRemaining != null) {
-      await supabase.from("logs").insert({ stock_id: inserted.id, date: initialDate || todayStr(), remaining: Number(initialRemaining) });
+      const { error: logErr } = await supabase.from("logs").insert({ stock_id: inserted.id, date: initialDate || todayStr(), remaining: Number(initialRemaining) });
+      if (logErr) setError("初期残数の記録に失敗: " + logErr.message);
     }
     await refresh();
   };
-  const deleteStock = async (id) => { await supabase.from("stocks").delete().eq("id", id); if (selectedStockId === id) setSelectedStockId(null); await refresh(); };
-
-  const addLog = async (stockId, date, remaining) => {
-    await supabase.from("logs").insert({ stock_id: stockId, date, remaining: Number(remaining) });
+  const deleteStock = async (id) => {
+    const { error: err } = await supabase.from("stocks").delete().eq("id", id);
+    if (err) { setError("削除に失敗: " + err.message); return; }
+    setError(null);
+    if (selectedStockId === id) setSelectedStockId(null);
     await refresh();
   };
-  const deleteLog = async (logId) => { await supabase.from("logs").delete().eq("id", logId); await refresh(); };
+
+  const addLog = async (stockId, date, remaining) => {
+    const { error: err } = await supabase.from("logs").insert({ stock_id: stockId, date, remaining: Number(remaining) });
+    if (err) { setError("記録の追加に失敗: " + err.message); return; }
+    setError(null);
+    await refresh();
+  };
+  const deleteLog = async (logId) => {
+    const { error: err } = await supabase.from("logs").delete().eq("id", logId);
+    if (err) { setError("削除に失敗: " + err.message); return; }
+    setError(null);
+    await refresh();
+  };
   const updateManual = async (stockId, useManual, manualDailyUsage) => {
-    await supabase.from("stocks").update({ use_manual: useManual, manual_daily_usage: manualDailyUsage }).eq("id", stockId);
+    const { error: err } = await supabase.from("stocks").update({ use_manual: useManual, manual_daily_usage: manualDailyUsage }).eq("id", stockId);
+    if (err) { setError("設定の保存に失敗: " + err.message); return; }
+    setError(null);
     await refresh();
   };
 

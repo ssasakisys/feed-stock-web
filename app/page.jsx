@@ -64,6 +64,11 @@ function computeStockoutDate(stock) {
   return d.toISOString().slice(0, 10);
 }
 
+function computeDaysUntilStockout(stockoutDate) {
+  if (!stockoutDate) return null;
+  return daysBetween(todayStr(), stockoutDate);
+}
+
 function getStatus(daysLeft) {
   if (daysLeft == null) return "unknown";
   if (daysLeft <= 3) return "critical";
@@ -210,10 +215,10 @@ export default function App() {
 
   const enrichedStocks = useMemo(() => {
     return data.stocks.map((s) => {
-      const daysLeft = computeDaysLeft(s);
-      const status = getStatus(daysLeft);
       const usage = computeDailyUsage(s);
       const stockoutDate = computeStockoutDate(s);
+      const daysLeft = computeDaysUntilStockout(stockoutDate);
+      const status = getStatus(daysLeft);
       const logs = sortedLogs(s);
       const latest = logs[logs.length - 1];
       let projectedRemaining = null;

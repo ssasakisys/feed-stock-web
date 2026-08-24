@@ -25,6 +25,8 @@ function todayStr() { return new Date().toISOString().slice(0, 10); }
 function daysBetween(d1, d2) { return Math.round((new Date(d2) - new Date(d1)) / 86400000); }
 function fmtDate(d) { const dt = new Date(d); return `${dt.getMonth() + 1}/${dt.getDate()}`; }
 function fmtDateFull(d) { const dt = new Date(d); return `${dt.getFullYear()}/${dt.getMonth() + 1}/${dt.getDate()}`; }
+const WEEKDAY_LABELS = ["日", "月", "火", "水", "木", "金", "土"];
+function fmtDateWeekday(d) { const dt = new Date(d); return `${dt.getMonth() + 1}/${dt.getDate()}(${WEEKDAY_LABELS[dt.getDay()]})`; }
 function sortedLogs(stock) { return [...(stock.logs || [])].sort((a, b) => new Date(a.date) - new Date(b.date)); }
 function getMondayOf(dateStr) {
   const d = new Date(dateStr);
@@ -38,6 +40,7 @@ function addDaysStr(dateStr, n) {
   d.setDate(d.getDate() + n);
   return d.toISOString().slice(0, 10);
 }
+function getSundayOf(dateStr) { return addDaysStr(getMondayOf(dateStr), 6); }
 
 function computeDailyUsage(stock) {
   if (stock.use_manual && stock.manual_daily_usage != null && stock.manual_daily_usage > 0) {
@@ -605,21 +608,32 @@ export default function App() {
 function HomeView({ enrichedStocks, farmName, productInfo, filterStatus, setFilterStatus, farms, onUpdateVisitDate, onSelect }) {
   const critical = enrichedStocks.filter((s) => s.status === "critical").length;
   const warning = enrichedStocks.filter((s) => s.status === "warning").length;
-  const filtered = filterStatus === "all" ? enrichedStocks : enrichedStocks.filter((s) => s.status === filterStatus);
+
+  const sunday = useMemo(() => getSundayOf(todayStr()), []);
+  const needsThisWeek = useMemo(() => enrichedStocks.filter((s) => s.stockoutDate && s.stockoutDate <= sunday), [enrichedStocks, sunday]);
+  const needsThisWeekIds = useMemo(() => new Set(needsThisWeek.map((s) => s.id)), [needsThisWeek]);
+
+  const filtered =
+    filterStatus === "all" ? enrichedStocks
+    : filterStatus === "thisWeek" ? needsThisWeek
+    : enrichedStocks.filter((s) => s.status === filterStatus);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
       <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
         <StatCard label="危険 (3日以内)" value={critical} color={COLORS.rust} />
         <StatCard label="注意 (7日以内)" value={warning} color={COLORS.amber} />
+        <div onClick={() => setFilterStatus("thisWeek")} style={{ cursor: "pointer", flex: 1, minWidth: 130 }}>
+          <StatCard label="今週配達が必要（月〜金）" value={needsThisWeek.length} color={COLORS.steel} />
+        </div>
       </div>
       <div>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
           <div style={{ fontFamily: "'Oswald', sans-serif", fontSize: 14, color: COLORS.textDim, textTransform: "uppercase" }}>農家全体の在庫状況（切れそうな順）</div>
-          <div style={{ display: "flex", gap: 6 }}>
-            {["all", "critical", "warning", "ok", "unknown"].map((k) => (
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            {["all", "thisWeek", "critical", "warning", "ok", "unknown"].map((k) => (
               <button key={k} onClick={() => setFilterStatus(k)} style={{ fontSize: 11, padding: "4px 9px", borderRadius: 4, cursor: "pointer", background: filterStatus === k ? COLORS.panelAlt : "transparent", border: `1px solid ${COLORS.border}`, color: COLORS.textDim }}>
-                {k === "all" ? "すべて" : STATUS_LABEL[k]}
+                {k === "all" ? "すべて" : k === "thisWeek" ? "今週配達" : STATUS_LABEL[k]}
               </button>
             ))}
           </div>
@@ -632,7 +646,14 @@ function HomeView({ enrichedStocks, farmName, productInfo, filterStatus, setFilt
                 <div style={{ fontWeight: 600, fontSize: 14 }}>{farmName(s.farmId)}</div>
                 <div style={{ fontSize: 12, color: COLORS.textDim }}>{productInfo(s.productId).name}</div>
               </div>
-              <div style={{ flex: 1, minWidth: 120 }}><Gauge_ daysLeft={s.daysLeft} status={s.status} /></div>
+              <div style={{ flex: 1, minWidth: 130 }}>
+                <Gauge_ daysLeft={s.daysLeft} status={s.status} />
+                {s.stockoutDate && (
+                  <div style={{ fontSize: 10, color: needsThisWeekIds.has(s.id) ? COLORS.amber : COLORS.textDim, marginTop: 3, fontWeight: needsThisWeekIds.has(s.id) ? 600 : 400 }}>
+                    予測: {fmtDateWeekday(s.stockoutDate)}
+                  </div>
+                )}
+              </div>
               <div style={{ width: 100, textAlign: "right" }}>
                 <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, color: COLORS.textDim }}>{s.latest ? `${Math.round(s.projectedRemaining)}${productInfo(s.productId).unit}` : "記録なし"}</div>
                 {s.latest && <div style={{ fontSize: 10, color: COLORS.textDim }}>本日予想</div>}
@@ -643,6 +664,9 @@ function HomeView({ enrichedStocks, farmName, productInfo, filterStatus, setFilt
               <div style={{ width: 90, display: "flex", flexDirection: "column", gap: 4, alignItems: "flex-start" }}>
                 <StatusBadge status={s.status} />
                 <TrendBadge trend={s.trend} />
+                {needsThisWeekIds.has(s.id) && (
+                  <span style={{ fontSize: 10, fontWeight: 600, color: COLORS.amber, border: `1px solid ${COLORS.amber}77`, borderRadius: 3, padding: "2px 6px", background: `${COLORS.amber}14`, whiteSpace: "nowrap" }}>今週配達</span>
+                )}
               </div>
             </div>
           ))}

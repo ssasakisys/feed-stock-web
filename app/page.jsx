@@ -848,6 +848,10 @@ function WeeklyPlanView({ enrichedStocks, farms, productInfo, onUpdateVisitDate,
   const needsPlan = isThisWeek
     ? enrichedStocks.filter((s) => s.stockoutDate && s.stockoutDate <= planHorizon).sort((a, b) => a.stockoutDate.localeCompare(b.stockoutDate))
     : [];
+  const sesameHorizon = addDaysStr(monday, 20);
+  const sesameChecks = isThisWeek
+    ? enrichedStocks.filter((s) => productInfo(s.productId).name.includes("セサミ") && s.stockoutDate && s.stockoutDate <= sesameHorizon).sort((a, b) => a.stockoutDate.localeCompare(b.stockoutDate))
+    : [];
 
   const handleExportWeekIcs = () => {
     const icsItems = [];
@@ -877,6 +881,35 @@ function WeeklyPlanView({ enrichedStocks, farms, productInfo, onUpdateVisitDate,
       <div style={{ fontSize: 11, color: COLORS.textDim, marginTop: -8 }}>
         ボタンを押すと .ics ファイルがダウンロードされます。Googleカレンダーの設定から「インポート」を選び、そのファイルを選択すると、この週に割り当てた農家の予定がまとめて登録されます。
       </div>
+
+      {isThisWeek && sesameChecks.length > 0 && (
+        <Panel title={`セサミ在庫確認（来週納品分 / ${sesameChecks.length}件）`}>
+          <div style={{ fontSize: 11, color: COLORS.textDim, marginBottom: 10 }}>セサミは「前週に在庫確認 → 翌週に納品」の流れなので、再来週の日曜（{fmtDate(sesameHorizon)}）までに切れる見込みのものを早めに出しています。今週の訪問時に実在庫を確認し、最終記録が古いものは記録を更新してください。</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {sesameChecks.map((s) => {
+              const farm = farms.find((f) => f.id === s.farmId);
+              const product = productInfo(s.productId);
+              const daysSinceRecord = s.latest ? daysBetween(s.latest.date, todayStr()) : null;
+              const upcoming = (s.planned_deliveries || []).filter((d) => d.date < s.stockoutDate).sort((a, b) => a.date.localeCompare(b.date))[0];
+              const defDateRaw = addDaysStr(s.stockoutDate, -1);
+              const defDate = defDateRaw < todayStr() ? todayStr() : defDateRaw;
+              const defQty = s.usage.value ? String(Math.ceil(s.usage.value * 14)) : "";
+              return (
+                <div key={s.id} style={{ display: "flex", flexDirection: "column", gap: 6, padding: "9px 10px", background: COLORS.panelAlt, borderRadius: 6 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", fontSize: 12 }}>
+                    <StatusBadge status={s.status} />
+                    <span style={{ fontWeight: 600, fontSize: 13 }}>{farm?.name || "?"}{farm?.region ? `（${farm.region}）` : ""}</span>
+                    <span style={{ color: COLORS.textDim }}>本日予想 {s.projectedRemaining != null ? `${Math.round(s.projectedRemaining)}${product.unit}` : "―"} ／ 切れ予測 {fmtDateFull(s.stockoutDate)}</span>
+                    {s.latest && <span style={{ fontSize: 11, color: daysSinceRecord >= 14 ? COLORS.amber : COLORS.textDim }}>最終記録 {fmtDate(s.latest.date)}{daysSinceRecord > 0 ? `（${daysSinceRecord}日前）` : ""}{daysSinceRecord >= 14 ? " ← 要確認" : ""}</span>}
+                    {upcoming && <span style={{ fontSize: 10, color: COLORS.steel, border: `1px solid ${COLORS.steel}77`, borderRadius: 3, padding: "2px 6px", whiteSpace: "nowrap" }}>{fmtDate(upcoming.date)}に納品予定あり</span>}
+                  </div>
+                  <DeliveryQuickAdd stockId={s.id} unit={product.unit} defaultDate={defDate} defaultQty={defQty} onAdd={onAddPlannedDelivery} />
+                </div>
+              );
+            })}
+          </div>
+        </Panel>
+      )}
 
       {isThisWeek && (
         <Panel title={`今週の要手配（${needsPlan.length}件）`}>

@@ -859,6 +859,7 @@ function DetailView({ stock, farmName, product, onBack, onAddLog, onDeleteLog, o
   const [useManual, setUseManualLocal] = useState(stock.use_manual);
 
   const logs = sortedLogs(stock);
+  const projectedToday = projectRemainingOnDate(stock, todayStr());
   const chartData = logs.map((l) => ({ date: fmtDate(l.date), remaining: l.remaining }));
   if (stock.stockoutDate) chartData.push({ date: fmtDate(stock.stockoutDate), remaining: 0 });
 
@@ -889,6 +890,7 @@ function DetailView({ stock, farmName, product, onBack, onAddLog, onDeleteLog, o
       </div>
       <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
         <StatCard label="現在の残数" value={stock.latest ? `${stock.latest.remaining}${product.unit}` : "―"} />
+        <StatCard label="本日の予想残量" value={projectedToday != null ? `${Math.round(projectedToday * 10) / 10}${product.unit}` : "―"} />
         <StatCard label="1日の使用量" value={stock.usage.value ? `${stock.usage.value.toFixed(2)}${product.unit}` : "―"} color={stock.usage.source === "manual" ? COLORS.steel : COLORS.text} />
         <StatCard label="月あたりの使用量" value={stock.usage.value ? `${(stock.usage.value * 30).toFixed(1)}${product.unit}` : "―"} color={stock.usage.source === "manual" ? COLORS.steel : COLORS.text} />
         <StatCard label="在庫切れ予測日" value={stock.stockoutDate ? fmtDateFull(stock.stockoutDate) : "―"} color={STATUS_COLOR[stock.status]} />

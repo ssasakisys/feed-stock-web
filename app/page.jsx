@@ -692,6 +692,7 @@ function HomeView({ enrichedStocks, farmName, productInfo, filterStatus, setFilt
               <div style={{ width: 100, textAlign: "right" }}>
                 <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, color: COLORS.textDim }}>{s.latest ? `${Math.round(s.projectedRemaining)}${productInfo(s.productId).unit}` : "記録なし"}</div>
                 {s.latest && <div style={{ fontSize: 10, color: COLORS.textDim }}>本日予想</div>}
+                {s.latest && <div style={{ fontSize: 10, marginTop: 2, color: daysBetween(s.latest.date, todayStr()) >= 14 ? COLORS.amber : COLORS.textDim }}>最終記録 {fmtDate(s.latest.date)}{daysBetween(s.latest.date, todayStr()) > 0 ? `（${daysBetween(s.latest.date, todayStr())}日前）` : ""}</div>}
               </div>
               <div style={{ width: 150, flexShrink: 0 }} onClick={(e) => e.stopPropagation()}>
                 <VisitDateCell farm={farms.find((f) => f.id === s.farmId)} onUpdateVisitDate={onUpdateVisitDate} stockoutDate={s.stockoutDate} />

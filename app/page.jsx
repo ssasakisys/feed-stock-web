@@ -76,21 +76,20 @@ function computeDaysLeft(stock) {
   return latest.remaining / usage.value;
 }
 
-function computeStockoutDate(stock) {
+function stockoutDateWithRate(stock, rate) {
   const logs = sortedLogs(stock);
   const latest = logs[logs.length - 1];
-  const usage = computeDailyUsage(stock);
-  if (!latest || !usage.value || usage.value <= 0) return null;
+  if (!latest || !rate || rate <= 0) return null;
   let remaining = latest.remaining;
   let cursor = latest.date;
   const deliveries = [...(stock.planned_deliveries || [])]
     .filter((d) => d.date > latest.date)
     .sort((a, b) => a.date.localeCompare(b.date));
   for (const d of deliveries) {
-    const usedUntilDelivery = usage.value * daysBetween(cursor, d.date);
+    const usedUntilDelivery = rate * daysBetween(cursor, d.date);
     if (usedUntilDelivery >= remaining) {
       const out = new Date(cursor);
-      out.setDate(out.getDate() + Math.floor(remaining / usage.value));
+      out.setDate(out.getDate() + Math.floor(remaining / rate));
       return out.toISOString().slice(0, 10);
     }
     remaining -= usedUntilDelivery;
@@ -98,8 +97,32 @@ function computeStockoutDate(stock) {
     cursor = d.date;
   }
   const out = new Date(cursor);
-  out.setDate(out.getDate() + Math.floor(remaining / usage.value));
+  out.setDate(out.getDate() + Math.floor(remaining / rate));
   return out.toISOString().slice(0, 10);
+}
+
+function computeStockoutDate(stock) {
+  const usage = computeDailyUsage(stock);
+  return stockoutDateWithRate(stock, usage.value);
+}
+
+// 直近（最大3区間）で最も減りが速かったペースでの使用量。減る量が増えた場合の早め予測に使う
+function computeMaxDailyUsage(stock) {
+  if (stock.use_manual && stock.manual_daily_usage != null) return stock.manual_daily_usage;
+  const logs = sortedLogs(stock);
+  const recentRates = [];
+  for (let i = logs.length - 1; i >= 1 && recentRates.length < 3; i--) {
+    const days = daysBetween(logs[i - 1].date, logs[i].date);
+    const used = logs[i - 1].remaining - logs[i].remaining;
+    if (days > 0 && used >= 0) recentRates.push(used / days);
+  }
+  if (recentRates.length > 0) return Math.max(...recentRates);
+  if (stock.manual_daily_usage != null) return stock.manual_daily_usage;
+  return null;
+}
+
+function computeEarliestStockoutDate(stock) {
+  return stockoutDateWithRate(stock, computeMaxDailyUsage(stock));
 }
 
 function computeDaysUntilStockout(stockoutDate) {
@@ -398,13 +421,14 @@ export default function App() {
     return data.stocks.map((s) => {
       const usage = computeDailyUsage(s);
       const stockoutDate = computeStockoutDate(s);
+      const earliestStockoutDate = computeEarliestStockoutDate(s);
       const daysLeft = computeDaysUntilStockout(stockoutDate);
       const status = getStatus(daysLeft);
       const logs = sortedLogs(s);
       const latest = logs[logs.length - 1];
       const projectedRemaining = projectRemainingOnDate(s, todayStr());
       const trend = computeUsageTrend(s);
-      return { ...s, farmId: s.farm_id, productId: s.product_id, daysLeft, status, usage, stockoutDate, latest, projectedRemaining, trend };
+      return { ...s, farmId: s.farm_id, productId: s.product_id, daysLeft, status, usage, stockoutDate, earliestStockoutDate, latest, projectedRemaining, trend };
     });
   }, [data.stocks]);
 
@@ -852,6 +876,17 @@ function WeeklyPlanView({ enrichedStocks, farms, productInfo, onUpdateVisitDate,
   const sesameChecks = isThisWeek
     ? enrichedStocks.filter((s) => productInfo(s.productId).name.includes("セサミ") && s.stockoutDate && s.stockoutDate <= sesameHorizon).sort((a, b) => a.stockoutDate.localeCompare(b.stockoutDate))
     : [];
+  const nextMonday = addDaysStr(monday, 7);
+  const thisFriday = addDaysStr(monday, 4);
+  const urgentThisWeek = isThisWeek
+    ? enrichedStocks
+        .filter((s) => {
+          if (productInfo(s.productId).name.includes("セサミ")) return false;
+          const judge = s.earliestStockoutDate || s.stockoutDate;
+          return judge && judge <= nextMonday;
+        })
+        .sort((a, b) => (a.earliestStockoutDate || a.stockoutDate).localeCompare(b.earliestStockoutDate || b.stockoutDate))
+    : [];
 
   const handleExportWeekIcs = () => {
     const icsItems = [];
@@ -901,6 +936,34 @@ function WeeklyPlanView({ enrichedStocks, farms, productInfo, onUpdateVisitDate,
                     <span style={{ fontWeight: 600, fontSize: 13 }}>{farm?.name || "?"}{farm?.region ? `（${farm.region}）` : ""}</span>
                     <span style={{ color: COLORS.textDim }}>本日予想 {s.projectedRemaining != null ? `${Math.round(s.projectedRemaining)}${product.unit}` : "―"} ／ 切れ予測 {fmtDateFull(s.stockoutDate)}</span>
                     {s.latest && <span style={{ fontSize: 11, color: daysSinceRecord >= 14 ? COLORS.amber : COLORS.textDim }}>最終記録 {fmtDate(s.latest.date)}{daysSinceRecord > 0 ? `（${daysSinceRecord}日前）` : ""}{daysSinceRecord >= 14 ? " ← 要確認" : ""}</span>}
+                    {upcoming && <span style={{ fontSize: 10, color: COLORS.steel, border: `1px solid ${COLORS.steel}77`, borderRadius: 3, padding: "2px 6px", whiteSpace: "nowrap" }}>{fmtDate(upcoming.date)}に納品予定あり</span>}
+                  </div>
+                  <DeliveryQuickAdd stockId={s.id} unit={product.unit} defaultDate={defDate} defaultQty={defQty} onAdd={onAddPlannedDelivery} />
+                </div>
+              );
+            })}
+          </div>
+        </Panel>
+      )}
+
+      {isThisWeek && urgentThisWeek.length > 0 && (
+        <Panel title={`今週中に配送（来週月曜までに切れる分 / ${urgentThisWeek.length}件）`}>
+          <div style={{ fontSize: 11, color: COLORS.textDim, marginBottom: 10 }}>セサミ以外の商品で、来週の月曜までに切れる見込みのものです。減る量が増えると予測より早くなくなることがあるため、今週中の配送を前提にしています。「速いペース」は直近で一番減りが速かった区間での計算です。日付の初期値は今週の金曜です。</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {urgentThisWeek.map((s) => {
+              const farm = farms.find((f) => f.id === s.farmId);
+              const product = productInfo(s.productId);
+              const upcoming = (s.planned_deliveries || []).filter((d) => d.date < (s.stockoutDate || "9999")).sort((a, b) => a.date.localeCompare(b.date))[0];
+              const defDate = thisFriday < todayStr() ? todayStr() : thisFriday;
+              const defQty = s.usage.value ? String(Math.ceil(s.usage.value * 14)) : "";
+              return (
+                <div key={s.id} style={{ display: "flex", flexDirection: "column", gap: 6, padding: "9px 10px", background: COLORS.panelAlt, borderRadius: 6 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", fontSize: 12 }}>
+                    <StatusBadge status={s.status} />
+                    <span style={{ fontWeight: 600, fontSize: 13 }}>{farm?.name || "?"}{farm?.region ? `（${farm.region}）` : ""}</span>
+                    <span>{product.name}</span>
+                    <span style={{ color: COLORS.textDim }}>本日予想 {s.projectedRemaining != null ? `${Math.round(s.projectedRemaining)}${product.unit}` : "―"} ／ 切れ予測 {s.stockoutDate ? fmtDateFull(s.stockoutDate) : "―"}</span>
+                    {s.earliestStockoutDate && s.stockoutDate && s.earliestStockoutDate < s.stockoutDate && <span style={{ fontSize: 11, color: COLORS.amber }}>速いペースだと {fmtDateFull(s.earliestStockoutDate)}</span>}
                     {upcoming && <span style={{ fontSize: 10, color: COLORS.steel, border: `1px solid ${COLORS.steel}77`, borderRadius: 3, padding: "2px 6px", whiteSpace: "nowrap" }}>{fmtDate(upcoming.date)}に納品予定あり</span>}
                   </div>
                   <DeliveryQuickAdd stockId={s.id} unit={product.unit} defaultDate={defDate} defaultQty={defQty} onAdd={onAddPlannedDelivery} />

@@ -965,7 +965,7 @@ function DetailView({ stock, farmName, product, onBack, onAddLog, onDeleteLog, o
                   <tr key={l.id}>
                     <td>{fmtDateFull(l.date)}</td>
                     <td style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{l.remaining}{product.unit}</td>
-                    <td><button onClick={() => onDeleteLog(l.id)} style={{ background: "transparent", border: "none", color: COLORS.textDim, cursor: "pointer" }}><X size={13} /></button></td>
+                    <td><button onClick={() => { if (confirm("この記録を削除しますか？")) onDeleteLog(l.id); }} style={{ background: "transparent", border: "none", color: COLORS.textDim, cursor: "pointer" }}><X size={13} /></button></td>
                   </tr>
                 ))}
                 {logs.length === 0 && <tr><td colSpan={3} style={{ color: COLORS.textDim, fontStyle: "italic" }}>記録がありません</td></tr>}

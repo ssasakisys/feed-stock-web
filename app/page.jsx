@@ -51,14 +51,16 @@ function computeDailyUsage(stock) {
     return { value: stock.manual_daily_usage, source: "manual" };
   }
   const logs = sortedLogs(stock);
-  for (let i = logs.length - 1; i >= 1; i--) {
+  const recentRates = [];
+  for (let i = logs.length - 1; i >= 1 && recentRates.length < 3; i--) {
     const prev = logs[i - 1];
     const last = logs[i];
     const days = daysBetween(prev.date, last.date);
     const used = prev.remaining - last.remaining;
-    if (days > 0 && used >= 0) {
-      return { value: used / days, source: "calc" };
-    }
+    if (days > 0 && used >= 0) recentRates.push(used / days);
+  }
+  if (recentRates.length > 0) {
+    return { value: recentRates.reduce((a, b) => a + b, 0) / recentRates.length, source: "calc" };
   }
   if (stock.manual_daily_usage != null && stock.manual_daily_usage > 0) {
     return { value: stock.manual_daily_usage, source: "manual" };

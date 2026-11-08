@@ -79,11 +79,27 @@ function computeDaysLeft(stock) {
 function computeStockoutDate(stock) {
   const logs = sortedLogs(stock);
   const latest = logs[logs.length - 1];
-  const daysLeft = computeDaysLeft(stock);
-  if (!latest || daysLeft == null) return null;
-  const d = new Date(latest.date);
-  d.setDate(d.getDate() + Math.floor(daysLeft));
-  return d.toISOString().slice(0, 10);
+  const usage = computeDailyUsage(stock);
+  if (!latest || !usage.value || usage.value <= 0) return null;
+  let remaining = latest.remaining;
+  let cursor = latest.date;
+  const deliveries = [...(stock.planned_deliveries || [])]
+    .filter((d) => d.date > latest.date)
+    .sort((a, b) => a.date.localeCompare(b.date));
+  for (const d of deliveries) {
+    const usedUntilDelivery = usage.value * daysBetween(cursor, d.date);
+    if (usedUntilDelivery >= remaining) {
+      const out = new Date(cursor);
+      out.setDate(out.getDate() + Math.floor(remaining / usage.value));
+      return out.toISOString().slice(0, 10);
+    }
+    remaining -= usedUntilDelivery;
+    remaining += Number(d.quantity) || 0;
+    cursor = d.date;
+  }
+  const out = new Date(cursor);
+  out.setDate(out.getDate() + Math.floor(remaining / usage.value));
+  return out.toISOString().slice(0, 10);
 }
 
 function computeDaysUntilStockout(stockoutDate) {
@@ -139,7 +155,10 @@ function projectRemainingOnDate(stock, dateStr) {
   if (!usage.value) return latest.remaining;
   const daysSince = daysBetween(latest.date, dateStr);
   if (daysSince <= 0) return latest.remaining;
-  return Math.max(0, latest.remaining - usage.value * daysSince);
+  const delivered = (stock.planned_deliveries || [])
+    .filter((d) => d.date > latest.date && d.date < dateStr)
+    .reduce((sum, d) => sum + (Number(d.quantity) || 0), 0);
+  return Math.max(0, latest.remaining - usage.value * daysSince + delivered);
 }
 
 function getStatus(daysLeft) {
@@ -383,14 +402,7 @@ export default function App() {
       const status = getStatus(daysLeft);
       const logs = sortedLogs(s);
       const latest = logs[logs.length - 1];
-      let projectedRemaining = null;
-      if (latest) {
-        if (!usage.value) projectedRemaining = latest.remaining;
-        else {
-          const daysSince = daysBetween(latest.date, todayStr());
-          projectedRemaining = daysSince <= 0 ? latest.remaining : Math.max(0, latest.remaining - usage.value * daysSince);
-        }
-      }
+      const projectedRemaining = projectRemainingOnDate(s, todayStr());
       const trend = computeUsageTrend(s);
       return { ...s, farmId: s.farm_id, productId: s.product_id, daysLeft, status, usage, stockoutDate, latest, projectedRemaining, trend };
     });

@@ -12,6 +12,10 @@ import {
 } from "lucide-react";
 import { supabase } from "../lib/supabaseClient";
 
+// 簡易パスコード保護: Vercelの環境変数 NEXT_PUBLIC_APP_PASSCODE が設定されている場合のみ有効。
+// 未設定なら従来どおり素通りする。あくまで簡易的な抑止であり、本格的な認証ではない。
+const APP_PASSCODE = process.env.NEXT_PUBLIC_APP_PASSCODE || "";
+
 const GAUGE_MAX_DAYS = 30;
 
 const COLORS = {
@@ -307,6 +311,30 @@ function VisitDateCell({ farm, onUpdateVisitDate, stockoutDate }) {
   );
 }
 
+function LockScreen({ onUnlock }) {
+  const [input, setInput] = useState("");
+  const [failed, setFailed] = useState(false);
+  const submit = () => {
+    if (input === APP_PASSCODE) {
+      sessionStorage.setItem("fsg_unlocked", "1");
+      onUnlock();
+    } else {
+      setFailed(true);
+    }
+  };
+  return (
+    <div style={{ fontFamily: "'IBM Plex Sans JP', sans-serif", background: COLORS.bg, color: COLORS.text, minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+      <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.border}`, borderRadius: 7, padding: 24, width: "100%", maxWidth: 340 }}>
+        <div style={{ fontFamily: "'Oswald', sans-serif", fontSize: 17, fontWeight: 600 }}>FEED STOCK GAUGE</div>
+        <div style={{ fontSize: 12, color: COLORS.textDim, marginTop: 4, marginBottom: 16 }}>パスコードを入力してください</div>
+        <input type="password" value={input} onChange={(e) => { setInput(e.target.value); setFailed(false); }} onKeyDown={(e) => { if (e.key === "Enter") submit(); }} style={{ ...inputStyle, width: "100%", boxSizing: "border-box" }} placeholder="パスコード" autoFocus />
+        {failed && <div style={{ fontSize: 12, color: COLORS.rust, marginTop: 8 }}>パスコードが違います</div>}
+        <Btn variant="primary" onClick={submit} style={{ marginTop: 14, width: "100%", justifyContent: "center" }}>開く</Btn>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const [data, setData] = useState({ farms: [], products: [], stocks: [] });
   const [loading, setLoading] = useState(true);
@@ -315,6 +343,7 @@ export default function App() {
   const [leadDays, setLeadDays] = useState(3);
   const [filterStatus, setFilterStatus] = useState("all");
   const [error, setError] = useState(null);
+  const [unlocked, setUnlocked] = useState(() => typeof window !== "undefined" && sessionStorage.getItem("fsg_unlocked") === "1");
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -543,6 +572,10 @@ export default function App() {
   };
 
   const selectedStock = enrichedStocks.find((s) => s.id === selectedStockId);
+
+  if (APP_PASSCODE && !unlocked) {
+    return <LockScreen onUnlock={() => setUnlocked(true)} />;
+  }
 
   return (
     <div style={{ fontFamily: "'IBM Plex Sans JP', sans-serif", background: COLORS.bg, color: COLORS.text, minHeight: "100vh" }}>

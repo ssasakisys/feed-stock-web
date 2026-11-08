@@ -645,7 +645,7 @@ export default function App() {
           <FarmsView data={data} enrichedStocks={enrichedStocks} onAddFarm={addFarm} onAddFarmsBulk={addFarmsBulk} onDeleteFarm={deleteFarm} onMoveFarm={moveFarm} onUpdateVisitDate={updateFarmVisitDate} onAddStock={addStock} onDeleteStock={deleteStock} onSelect={(id) => { setSelectedStockId(id); setTab("detail"); }} />
         )}
         {tab === "products" && (<ProductsView data={data} enrichedStocks={enrichedStocks} farmName={farmName} onAddProduct={addProduct} onDeleteProduct={deleteProduct} />)}
-        {tab === "weekly" && (<WeeklyPlanView enrichedStocks={enrichedStocks} farms={data.farms} productInfo={productInfo} onUpdateVisitDate={updateFarmVisitDate} />)}
+        {tab === "weekly" && (<WeeklyPlanView enrichedStocks={enrichedStocks} farms={data.farms} productInfo={productInfo} onUpdateVisitDate={updateFarmVisitDate} onAddPlannedDelivery={addPlannedDelivery} onDeletePlannedDelivery={deletePlannedDelivery} />)}
         {tab === "alerts" && (<AlertsView items={alertItems} enrichedStocks={enrichedStocks} farmName={farmName} productInfo={productInfo} leadDays={leadDays} setLeadDays={setLeadDays} onSelect={(id) => { setSelectedStockId(id); setTab("detail"); }} />)}
       </div>
     </div>
@@ -779,7 +779,19 @@ function WeeklySummaryWidget({ enrichedStocks, farms, onOpenWeekly }) {
   );
 }
 
-function WeeklyPlanView({ enrichedStocks, farms, productInfo, onUpdateVisitDate }) {
+function DeliveryQuickAdd({ stockId, unit, defaultDate, defaultQty, onAdd }) {
+  const [date, setDate] = useState(defaultDate);
+  const [qty, setQty] = useState(defaultQty);
+  return (
+    <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+      <input type="date" value={date} onChange={(e) => setDate(e.target.value)} style={inputStyle} />
+      <input type="number" value={qty} onChange={(e) => setQty(e.target.value)} style={{ ...inputStyle, width: 100 }} placeholder={`数量 (${unit})`} />
+      <Btn variant="primary" onClick={() => onAdd(stockId, date, qty)}>予定に追加</Btn>
+    </div>
+  );
+}
+
+function WeeklyPlanView({ enrichedStocks, farms, productInfo, onUpdateVisitDate, onAddPlannedDelivery, onDeletePlannedDelivery }) {
   const [weekOffset, setWeekOffset] = useState(0);
   const monday = useMemo(() => addDaysStr(getMondayOf(todayStr()), weekOffset * 7), [weekOffset]);
   const weekDates = useMemo(() => [0, 1, 2, 3, 4].map((i) => addDaysStr(monday, i)), [monday]);
@@ -815,6 +827,28 @@ function WeeklyPlanView({ enrichedStocks, farms, productInfo, onUpdateVisitDate 
   const byDay = weekDates.map((date) => ({ date, items: farmSummaries.filter(({ farm }) => farm.next_visit_date === date) }));
   const scheduledCount = byDay.reduce((sum, d) => sum + d.items.length, 0);
 
+  const sunday = addDaysStr(monday, 6);
+  const weekDeliveries = useMemo(() => {
+    const list = [];
+    enrichedStocks.forEach((s) => {
+      (s.planned_deliveries || []).forEach((d) => {
+        if (d.date >= monday && d.date <= sunday) list.push({ stock: s, delivery: d, farm: farms.find((f) => f.id === s.farmId) });
+      });
+    });
+    return list.sort((a, b) => a.delivery.date.localeCompare(b.delivery.date) || (a.farm?.name || "").localeCompare(b.farm?.name || ""));
+  }, [enrichedStocks, farms, monday, sunday]);
+  const weekTotalsByProduct = useMemo(() => {
+    const map = new Map();
+    weekDeliveries.forEach(({ stock, delivery }) => {
+      map.set(stock.productId, (map.get(stock.productId) || 0) + (Number(delivery.quantity) || 0));
+    });
+    return Array.from(map.entries());
+  }, [weekDeliveries]);
+  const planHorizon = addDaysStr(monday, 13);
+  const needsPlan = isThisWeek
+    ? enrichedStocks.filter((s) => s.stockoutDate && s.stockoutDate <= planHorizon).sort((a, b) => a.stockoutDate.localeCompare(b.stockoutDate))
+    : [];
+
   const handleExportWeekIcs = () => {
     const icsItems = [];
     byDay.forEach(({ date, items }) => {
@@ -843,6 +877,68 @@ function WeeklyPlanView({ enrichedStocks, farms, productInfo, onUpdateVisitDate 
       <div style={{ fontSize: 11, color: COLORS.textDim, marginTop: -8 }}>
         ボタンを押すと .ics ファイルがダウンロードされます。Googleカレンダーの設定から「インポート」を選び、そのファイルを選択すると、この週に割り当てた農家の予定がまとめて登録されます。
       </div>
+
+      {isThisWeek && (
+        <Panel title={`今週の要手配（${needsPlan.length}件）`}>
+          <div style={{ fontSize: 11, color: COLORS.textDim, marginBottom: 10 }}>来週の日曜（{fmtDate(planHorizon)}）までに切れる見込みの在庫です。数量の初期値は2週間分の目安なので、必要なら直してから追加してください。追加した予定は予想残量と切れ予測に自動で反映されます。</div>
+          {needsPlan.length === 0 ? (
+            <Empty text="手配が必要な在庫はありません" />
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {needsPlan.map((s) => {
+                const farm = farms.find((f) => f.id === s.farmId);
+                const product = productInfo(s.productId);
+                const upcoming = (s.planned_deliveries || []).filter((d) => d.date < s.stockoutDate).sort((a, b) => a.date.localeCompare(b.date))[0];
+                const defDateRaw = addDaysStr(s.stockoutDate, -1);
+                const defDate = defDateRaw < todayStr() ? todayStr() : defDateRaw;
+                const defQty = s.usage.value ? String(Math.ceil(s.usage.value * 14)) : "";
+                return (
+                  <div key={s.id} style={{ display: "flex", flexDirection: "column", gap: 6, padding: "9px 10px", background: COLORS.panelAlt, borderRadius: 6 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", fontSize: 12 }}>
+                      <StatusBadge status={s.status} />
+                      <span style={{ fontWeight: 600, fontSize: 13 }}>{farm?.name || "?"}{farm?.region ? `（${farm.region}）` : ""}</span>
+                      <span>{product.name}</span>
+                      <span style={{ color: COLORS.textDim }}>本日予想 {s.projectedRemaining != null ? `${Math.round(s.projectedRemaining)}${product.unit}` : "―"} ／ 切れ予測 {fmtDateFull(s.stockoutDate)} ／ 1日 {s.usage.value ? s.usage.value.toFixed(2) : "―"}{product.unit}</span>
+                      {upcoming && <span style={{ fontSize: 10, color: COLORS.steel, border: `1px solid ${COLORS.steel}77`, borderRadius: 3, padding: "2px 6px", whiteSpace: "nowrap" }}>{fmtDate(upcoming.date)}に納品予定あり</span>}
+                    </div>
+                    <DeliveryQuickAdd stockId={s.id} unit={product.unit} defaultDate={defDate} defaultQty={defQty} onAdd={onAddPlannedDelivery} />
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </Panel>
+      )}
+
+      <Panel title={`この週の納品予定（${weekDeliveries.length}件）`}>
+        {weekDeliveries.length === 0 ? (
+          <Empty text="この週の納品予定はまだありません" />
+        ) : (
+          <>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              {weekDeliveries.map(({ stock, delivery, farm }) => {
+                const product = productInfo(stock.productId);
+                const before = projectRemainingOnDate(stock, delivery.date);
+                return (
+                  <div key={delivery.id} style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 12, padding: "7px 9px", background: COLORS.panelAlt, borderRadius: 5, flexWrap: "wrap" }}>
+                    <div style={{ width: 128, fontWeight: 600 }}>{fmtDateFull(delivery.date)}{delivery.date === todayStr() ? "（本日）" : ""}</div>
+                    <div style={{ minWidth: 110 }}>{farm?.name || "?"}</div>
+                    <div style={{ color: COLORS.textDim }}>{product.name}</div>
+                    <div style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{delivery.quantity}{product.unit}</div>
+                    <div style={{ fontSize: 11, color: COLORS.textDim, flex: 1 }}>納品前の予想残量: {before != null ? `${Math.round(before * 10) / 10}${product.unit}` : "―"}</div>
+                    <button onClick={() => onDeletePlannedDelivery(stock.id, delivery.id)} style={{ background: "transparent", border: "none", color: COLORS.textDim, cursor: "pointer" }}><X size={13} /></button>
+                  </div>
+                );
+              })}
+            </div>
+            {weekTotalsByProduct.length > 0 && (
+              <div style={{ fontSize: 11, color: COLORS.textDim, marginTop: 10 }}>
+                週の合計（積み込み目安）：{weekTotalsByProduct.map(([pid, qty]) => `${productInfo(pid).name} ${qty}${productInfo(pid).unit}`).join(" ／ ")}
+              </div>
+            )}
+          </>
+        )}
+      </Panel>
 
       {isThisWeek && (
         <Panel title={`未割当（今週中の対応が必要 / ${unassigned.length}件）`}>

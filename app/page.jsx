@@ -384,6 +384,20 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState("home");
   const [selectedStockId, setSelectedStockId] = useState(null);
+  const [history, setHistory] = useState([]);
+  const navigateTo = (nextTab, nextStockId = null) => {
+    if (nextTab === tab && nextStockId === selectedStockId) return;
+    setHistory((h) => [...h.slice(-19), { tab, selectedStockId }]);
+    setTab(nextTab);
+    setSelectedStockId(nextStockId);
+  };
+  const goBack = () => {
+    if (history.length === 0) return;
+    const prev = history[history.length - 1];
+    setHistory(history.slice(0, -1));
+    setTab(prev.tab);
+    setSelectedStockId(prev.selectedStockId);
+  };
   const [leadDays, setLeadDays] = useState(3);
   const [filterStatus, setFilterStatus] = useState("all");
   const [error, setError] = useState(null);
@@ -552,7 +566,11 @@ export default function App() {
     const { error: err } = await supabase.from("stocks").delete().eq("id", id);
     if (err) { setError("削除に失敗: " + err.message); return; }
     setError(null);
-    if (selectedStockId === id) setSelectedStockId(null);
+    if (selectedStockId === id) {
+      setSelectedStockId(null);
+      setTab("home");
+      setHistory((h) => h.filter((s) => s.selectedStockId !== id));
+    }
     await refresh();
   };
 
@@ -629,7 +647,7 @@ export default function App() {
         </div>
         <nav style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
           {[["home", "ホーム", HomeIcon], ["weekly", "週間計画", CalendarDays], ["farms", "農家", Warehouse], ["products", "商品", Package], ["alerts", "アラート", AlertTriangle]].map(([key, label, Icon]) => (
-            <button key={key} onClick={() => { setTab(key); setSelectedStockId(null); }} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: "none", cursor: "pointer", padding: "8px 12px", borderRadius: 5, color: tab === key ? COLORS.text : COLORS.textDim, borderBottom: tab === key ? `2px solid ${COLORS.sage}` : "2px solid transparent", fontSize: 13, fontWeight: 500 }}>
+            <button key={key} onClick={() => navigateTo(key)} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: "none", cursor: "pointer", padding: "8px 12px", borderRadius: 5, color: tab === key ? COLORS.text : COLORS.textDim, borderBottom: tab === key ? `2px solid ${COLORS.sage}` : "2px solid transparent", fontSize: 13, fontWeight: 500 }}>
               <Icon size={15} /> {label}
             </button>
           ))}
@@ -639,15 +657,20 @@ export default function App() {
       <div style={{ padding: 20, maxWidth: 1100, margin: "0 auto" }}>
         {error && <div style={{ color: COLORS.rust, fontSize: 12, marginBottom: 10 }}>{error}</div>}
         {loading && <div style={{ color: COLORS.textDim, fontSize: 12, marginBottom: 10 }}>読み込み中...</div>}
+        {tab !== "detail" && history.length > 0 && (
+          <button onClick={goBack} style={{ background: "transparent", border: "none", color: COLORS.textDim, cursor: "pointer", display: "flex", alignItems: "center", gap: 5, fontSize: 13, padding: 0, marginBottom: 12 }}>
+            <ChevronLeft size={16} /> 一つ前に戻る
+          </button>
+        )}
 
         {tab === "home" && !selectedStockId && (
           <>
             {data.farms.length > 0 && (
               <div style={{ marginBottom: 16 }}>
-                <WeeklySummaryWidget enrichedStocks={enrichedStocks} farms={data.farms} onOpenWeekly={() => setTab("weekly")} />
+                <WeeklySummaryWidget enrichedStocks={enrichedStocks} farms={data.farms} onOpenWeekly={() => navigateTo("weekly")} />
               </div>
             )}
-            <HomeView enrichedStocks={sortedByUrgency} farmName={farmName} productInfo={productInfo} filterStatus={filterStatus} setFilterStatus={setFilterStatus} farms={data.farms} onUpdateVisitDate={updateFarmVisitDate} onSelect={(id) => { setSelectedStockId(id); setTab("detail"); }} />
+            <HomeView enrichedStocks={sortedByUrgency} farmName={farmName} productInfo={productInfo} filterStatus={filterStatus} setFilterStatus={setFilterStatus} farms={data.farms} onUpdateVisitDate={updateFarmVisitDate} onSelect={(id) => navigateTo("detail", id)} />
           </>
         )}
         {tab === "detail" && selectedStock && (
@@ -655,7 +678,7 @@ export default function App() {
             stock={selectedStock}
             farmName={farmName(selectedStock.farmId)}
             product={productInfo(selectedStock.productId)}
-            onBack={() => { setTab("home"); setSelectedStockId(null); }}
+            onBack={goBack}
             onAddLog={addLog}
             onDeleteLog={deleteLog}
             onUpdateManual={updateManual}
@@ -666,11 +689,11 @@ export default function App() {
           />
         )}
         {tab === "farms" && (
-          <FarmsView data={data} enrichedStocks={enrichedStocks} onAddFarm={addFarm} onAddFarmsBulk={addFarmsBulk} onDeleteFarm={deleteFarm} onMoveFarm={moveFarm} onUpdateVisitDate={updateFarmVisitDate} onAddStock={addStock} onDeleteStock={deleteStock} onSelect={(id) => { setSelectedStockId(id); setTab("detail"); }} />
+          <FarmsView data={data} enrichedStocks={enrichedStocks} onAddFarm={addFarm} onAddFarmsBulk={addFarmsBulk} onDeleteFarm={deleteFarm} onMoveFarm={moveFarm} onUpdateVisitDate={updateFarmVisitDate} onAddStock={addStock} onDeleteStock={deleteStock} onSelect={(id) => navigateTo("detail", id)} />
         )}
         {tab === "products" && (<ProductsView data={data} enrichedStocks={enrichedStocks} farmName={farmName} onAddProduct={addProduct} onDeleteProduct={deleteProduct} />)}
         {tab === "weekly" && (<WeeklyPlanView enrichedStocks={enrichedStocks} farms={data.farms} productInfo={productInfo} onUpdateVisitDate={updateFarmVisitDate} onAddPlannedDelivery={addPlannedDelivery} onDeletePlannedDelivery={deletePlannedDelivery} />)}
-        {tab === "alerts" && (<AlertsView items={alertItems} enrichedStocks={enrichedStocks} farmName={farmName} productInfo={productInfo} leadDays={leadDays} setLeadDays={setLeadDays} onSelect={(id) => { setSelectedStockId(id); setTab("detail"); }} />)}
+        {tab === "alerts" && (<AlertsView items={alertItems} enrichedStocks={enrichedStocks} farmName={farmName} productInfo={productInfo} leadDays={leadDays} setLeadDays={setLeadDays} onSelect={(id) => navigateTo("detail", id)} />)}
       </div>
     </div>
   );
@@ -1114,7 +1137,7 @@ function DetailView({ stock, farmName, product, onBack, onAddLog, onDeleteLog, o
     <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
         <button onClick={onBack} style={{ background: "transparent", border: "none", color: COLORS.textDim, cursor: "pointer", display: "flex", alignItems: "center", gap: 5, fontSize: 13 }}>
-          <ChevronLeft size={16} /> ホームに戻る
+          <ChevronLeft size={16} /> 一つ前に戻る
         </button>
         <Btn variant="danger" onClick={() => { if (confirm("この在庫アイテムを削除しますか？")) onDeleteStock(stock.id); }}><Trash2 size={13} /> このアイテムを削除</Btn>
       </div>

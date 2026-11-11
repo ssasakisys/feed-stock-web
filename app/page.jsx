@@ -8,7 +8,7 @@ import {
 import {
   Plus, Trash2, ChevronLeft, AlertTriangle, CalendarPlus,
   Warehouse, Package, X, Gauge, Download, Settings2, Home as HomeIcon,
-  GripVertical, TrendingUp, TrendingDown, CalendarCheck, FileDown, Check, CalendarDays,
+  GripVertical, TrendingUp, TrendingDown, CalendarCheck, FileDown, Check, CalendarDays, Search,
 } from "lucide-react";
 import { supabase } from "../lib/supabaseClient";
 
@@ -700,6 +700,7 @@ export default function App() {
 }
 
 function HomeView({ enrichedStocks, farmName, productInfo, filterStatus, setFilterStatus, farms, onUpdateVisitDate, onSelect }) {
+  const [searchQuery, setSearchQuery] = useState("");
   const critical = enrichedStocks.filter((s) => s.status === "critical").length;
   const warning = enrichedStocks.filter((s) => s.status === "warning").length;
 
@@ -712,8 +713,20 @@ function HomeView({ enrichedStocks, farmName, productInfo, filterStatus, setFilt
     : filterStatus === "thisWeek" ? needsThisWeek
     : enrichedStocks.filter((s) => s.status === filterStatus);
 
+  const q = searchQuery.trim();
+  const searched = q ? filtered.filter((s) => farmName(s.farmId).includes(q)) : filtered;
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, background: COLORS.panel, border: `1px solid ${COLORS.border}`, borderRadius: 7, padding: "10px 14px" }}>
+        <Search size={16} color={COLORS.textDim} />
+        <input value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} placeholder="農家名で検索" style={{ flex: 1, background: "transparent", border: "none", outline: "none", color: COLORS.text, fontSize: 14, fontFamily: "inherit" }} />
+        {searchQuery && (
+          <button onClick={() => setSearchQuery("")} style={{ background: "transparent", border: "none", color: COLORS.textDim, cursor: "pointer", display: "flex", padding: 2 }}>
+            <X size={15} />
+          </button>
+        )}
+      </div>
       <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
         <StatCard label="危険 (3日以内)" value={critical} color={COLORS.rust} />
         <StatCard label="注意 (7日以内)" value={warning} color={COLORS.amber} />
@@ -733,8 +746,8 @@ function HomeView({ enrichedStocks, farmName, productInfo, filterStatus, setFilt
           </div>
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          {filtered.length === 0 && <Empty text="該当する在庫アイテムがありません" />}
-          {filtered.map((s) => (
+          {searched.length === 0 && <Empty text={q ? `「${q}」に一致する農家がありません` : "該当する在庫アイテムがありません"} />}
+          {searched.map((s) => (
             <div key={s.id} onClick={() => onSelect(s.id)} style={{ background: COLORS.panel, border: `1px solid ${COLORS.border}`, borderRadius: 7, padding: "12px 16px", display: "flex", alignItems: "center", gap: 16, cursor: "pointer", flexWrap: "wrap" }}>
               <div style={{ width: 140, flexShrink: 0 }}>
                 <div style={{ fontWeight: 600, fontSize: 14 }}>{farmName(s.farmId)}</div>

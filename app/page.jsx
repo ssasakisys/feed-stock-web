@@ -1773,6 +1773,7 @@ function MapView() {
   const mapDivRef = useRef(null);
   const mapRef = useRef(null);
   const layerRef = useRef(null);
+  const detailRef = useRef(null);
 
   const visibleFarms = useMemo(
     () => allFarms.filter((f) => (zone === "全て" || f.zone === zone) && (!followOnly || !!f.followText)),
@@ -1810,11 +1811,39 @@ function MapView() {
     layer.clearLayers();
     visibleFarms.forEach((f) => {
       if (typeof f.lat !== "number" || typeof f.lng !== "number") return;
-      L.circleMarker([f.lat, f.lng], { radius: 8, color: "#FFFFFF", weight: 1, fillColor: mapPinColor(f), fillOpacity: 0.9 })
+      const num = allFarms.indexOf(f) + 1;
+      const sel = f === selectedFarm;
+      const size = sel ? 38 : 26;
+      const badgeStyle = [
+        `width:${size}px`, `height:${size}px`, "border-radius:50%",
+        `background:${mapPinColor(f)}`, `border:${sel ? 3 : 2}px solid #fff`,
+        "color:#fff", `font-size:${sel ? 14 : 11}px`, "font-weight:700",
+        "display:flex", "align-items:center", "justify-content:center",
+        `box-shadow:${sel ? "0 0 0 6px rgba(255,255,255,.35), 0 2px 10px rgba(0,0,0,.6)" : "0 1px 4px rgba(0,0,0,.45)"}`,
+        "box-sizing:border-box",
+      ].join(";");
+      const icon = L.divIcon({
+        className: "map-num-icon",
+        html: `<div style="${badgeStyle}">${num}</div>`,
+        iconSize: [size, size],
+        iconAnchor: [size / 2, size / 2],
+      });
+      const marker = L.marker([f.lat, f.lng], { icon, zIndexOffset: sel ? 1000 : 0 })
         .on("click", () => setSelectedFarm(f))
         .addTo(layer);
+      if (sel) {
+        marker.bindTooltip(
+          L.tooltip({ permanent: true, direction: "top", offset: [0, -22], className: "map-name-tip" })
+            .setContent(String(f.name || "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])))
+        );
+      }
     });
-  }, [mapReady, visibleFarms]);
+  }, [mapReady, visibleFarms, selectedFarm, allFarms]);
+
+  // 選択時に詳細パネルを画面内へスクロール
+  useEffect(() => {
+    if (selectedFarm && detailRef.current) detailRef.current.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }, [selectedFarm]);
 
   // 絞り込みで非表示になった農家の詳細は閉じる
   useEffect(() => {
@@ -1826,6 +1855,7 @@ function MapView() {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <style>{`.map-num-icon{background:none;border:none}.map-name-tip{background:#161B22;color:#E6EDF3;border:1px solid #2D333B;font-weight:600}.map-name-tip:before{display:none}`}</style>
       <div style={{ fontSize: 12, color: COLORS.textDim }}>
         試作版（読み取り専用）：データは{mapPinsData.snapshot}時点のスナップショットです。編集はスペース版で行ってください。
       </div>
@@ -1848,6 +1878,7 @@ function MapView() {
             </span>
           ))}
         </div>
+        <div style={{ marginTop: 6, fontSize: 11, color: COLORS.textDim }}>番号はスペース版のピン番号と同じです。</div>
       </Panel>
 
       {loadError && <div style={{ color: COLORS.rust, fontSize: 12 }}>{loadError}</div>}
@@ -1856,10 +1887,10 @@ function MapView() {
       </div>
 
       {f ? (
-        <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.border}`, borderRadius: 7, padding: 16, display: "flex", flexDirection: "column", gap: 6 }}>
+        <div ref={detailRef} style={{ background: COLORS.panel, border: `1px solid ${COLORS.border}`, borderRadius: 7, padding: 16, display: "flex", flexDirection: "column", gap: 6 }}>
           <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 8 }}>
             <div>
-              <div style={{ fontWeight: 700, fontSize: 16 }}>{f.name}</div>
+              <div style={{ fontWeight: 700, fontSize: 16 }}>{`No.${allFarms.indexOf(f) + 1} `}{f.name}</div>
               <div style={{ fontSize: 12, color: COLORS.textDim }}>{[f.zone, f.area].filter(Boolean).join(" / ")}</div>
             </div>
             <button onClick={() => setSelectedFarm(null)} aria-label="閉じる" style={{ background: "transparent", border: "none", color: COLORS.textDim, cursor: "pointer", padding: 2 }}><X size={16} /></button>

@@ -1840,6 +1840,21 @@ function MapView() {
     });
   }, [mapReady, visibleFarms, selectedFarm, allFarms]);
 
+  // 地区・フォロー絞り込み変更時に地図の表示範囲を合わせる
+  useEffect(() => {
+    if (!mapReady || !mapRef.current || !window.L) return;
+    const map = mapRef.current;
+    const targets = visibleFarms.filter((t) => typeof t.lat === "number" && typeof t.lng === "number");
+    if (zone === "全て" && !followOnly) {
+      map.flyTo([42.92, 143.20], 9);
+    } else if (targets.length === 1) {
+      map.flyTo([targets[0].lat, targets[0].lng], 11);
+    } else if (targets.length > 1) {
+      map.flyToBounds(window.L.latLngBounds(targets.map((t) => [t.lat, t.lng])), { padding: [36, 36], maxZoom: 11 });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mapReady, zone, followOnly]);
+
   // 選択時に詳細パネルを画面内へスクロール
   useEffect(() => {
     if (selectedFarm && detailRef.current) detailRef.current.scrollIntoView({ behavior: "smooth", block: "nearest" });

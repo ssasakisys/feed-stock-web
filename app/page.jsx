@@ -24,6 +24,38 @@ const COLORS = {
   rust: "#C1502E", gray: "#5B6572", steel: "#5C7C99",
 };
 
+// 商品ごとの色分け（表示専用）。キーワードは上から順に判定する。
+const PRODUCT_COLOR_RULES = [
+  [["セサミ"], "#F2A33C"],
+  [["ホタくん1号", "ホタくん１号"], "#3EC6B8"],
+  [["ホタくん2号", "ホタくん２号"], "#B49AE0"],
+  [["ホタくん"], "#3EC6B8"],
+  [["パウダー"], "#5BB8E8"],
+  [["岩塩"], "#F28BA8"],
+  [["ビタミン"], "#F5D13C"],
+  [["バミューダ"], "#9BD147"],
+  [["麦稈"], "#E07A5F"],
+  [["ラップ"], "#A9C6E8"],
+  [["乾草"], "#D9C25A"],
+  [["牧草"], "#4FAE62"],
+];
+const PRODUCT_FALLBACK_COLORS = ["#F2A33C", "#5BB8E8", "#F28BA8", "#6FC45E", "#B49AE0", "#F5D13C", "#3EC6B8", "#E07A5F"];
+function productColor(name) {
+  const n = name == null ? "" : String(name);
+  if (!n || n === "?") return "#9AA5B1";
+  for (const [keys, color] of PRODUCT_COLOR_RULES) {
+    if (keys.some((k) => n.includes(k))) return color;
+  }
+  let sum = 0;
+  for (let i = 0; i < n.length; i++) sum += n.charCodeAt(i);
+  return PRODUCT_FALLBACK_COLORS[sum % PRODUCT_FALLBACK_COLORS.length];
+}
+function ProductChip({ name, large }) {
+  return (
+    <span style={{ display: "inline-block", background: productColor(name), color: "#14181D", fontWeight: 700, borderRadius: 999, padding: large ? "2px 12px" : "1px 8px", fontSize: large ? 15 : 12, whiteSpace: "nowrap", lineHeight: 1.5 }}>{name}</span>
+  );
+}
+
 function uid() { return Math.random().toString(36).slice(2, 10); }
 function todayStr() { return new Date().toISOString().slice(0, 10); }
 function daysBetween(d1, d2) { return Math.round((new Date(d2) - new Date(d1)) / 86400000); }
@@ -751,7 +783,7 @@ function HomeView({ enrichedStocks, farmName, productInfo, filterStatus, setFilt
             <div key={s.id} onClick={() => onSelect(s.id)} style={{ background: COLORS.panel, border: `1px solid ${COLORS.border}`, borderRadius: 7, padding: "12px 16px", display: "flex", alignItems: "center", gap: 16, cursor: "pointer", flexWrap: "wrap" }}>
               <div style={{ width: 140, flexShrink: 0 }}>
                 <div style={{ fontWeight: 600, fontSize: 14 }}>{farmName(s.farmId)}</div>
-                <div style={{ fontSize: 12, color: COLORS.textDim }}>{productInfo(s.productId).name}</div>
+                <div style={{ fontSize: 12, color: COLORS.textDim }}><ProductChip name={productInfo(s.productId).name} /></div>
               </div>
               <div style={{ flex: 1, minWidth: 130 }}>
                 <Gauge_ daysLeft={s.daysLeft} status={s.status} />
@@ -970,6 +1002,7 @@ function WeeklyPlanView({ enrichedStocks, farms, productInfo, onUpdateVisitDate,
                   <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", fontSize: 12 }}>
                     <StatusBadge status={s.status} />
                     <span style={{ fontWeight: 600, fontSize: 13 }}>{farm?.name || "?"}{farm?.region ? `（${farm.region}）` : ""}</span>
+                    <ProductChip name={product.name} />
                     <span style={{ color: COLORS.textDim }}>本日予想 {s.projectedRemaining != null ? `${Math.round(s.projectedRemaining)}${product.unit}` : "―"} ／ 切れ予測 {fmtDateFull(s.stockoutDate)}</span>
                     {s.latest && <span style={{ fontSize: 11, color: daysSinceRecord >= 14 ? COLORS.amber : COLORS.textDim }}>最終記録 {fmtDate(s.latest.date)}{daysSinceRecord > 0 ? `（${daysSinceRecord}日前）` : ""}{daysSinceRecord >= 14 ? " ← 要確認" : ""}</span>}
                     {upcoming && <span style={{ fontSize: 10, color: COLORS.steel, border: `1px solid ${COLORS.steel}77`, borderRadius: 3, padding: "2px 6px", whiteSpace: "nowrap" }}>{fmtDate(upcoming.date)}に納品予定あり</span>}
@@ -997,7 +1030,7 @@ function WeeklyPlanView({ enrichedStocks, farms, productInfo, onUpdateVisitDate,
                   <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", fontSize: 12 }}>
                     <StatusBadge status={s.status} />
                     <span style={{ fontWeight: 600, fontSize: 13 }}>{farm?.name || "?"}{farm?.region ? `（${farm.region}）` : ""}</span>
-                    <span>{product.name}</span>
+                    <ProductChip name={product.name} />
                     <span style={{ color: COLORS.textDim }}>本日予想 {s.projectedRemaining != null ? `${Math.round(s.projectedRemaining)}${product.unit}` : "―"} ／ 切れ予測 {s.stockoutDate ? fmtDateFull(s.stockoutDate) : "―"}</span>
                     {s.earliestStockoutDate && s.stockoutDate && s.earliestStockoutDate < s.stockoutDate && <span style={{ fontSize: 11, color: COLORS.amber }}>速いペースだと {fmtDateFull(s.earliestStockoutDate)}</span>}
                     {upcoming && <span style={{ fontSize: 10, color: COLORS.steel, border: `1px solid ${COLORS.steel}77`, borderRadius: 3, padding: "2px 6px", whiteSpace: "nowrap" }}>{fmtDate(upcoming.date)}に納品予定あり</span>}
@@ -1029,7 +1062,7 @@ function WeeklyPlanView({ enrichedStocks, farms, productInfo, onUpdateVisitDate,
                     <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", fontSize: 12 }}>
                       <StatusBadge status={s.status} />
                       <span style={{ fontWeight: 600, fontSize: 13 }}>{farm?.name || "?"}{farm?.region ? `（${farm.region}）` : ""}</span>
-                      <span>{product.name}</span>
+                      <ProductChip name={product.name} />
                       <span style={{ color: COLORS.textDim }}>本日予想 {s.projectedRemaining != null ? `${Math.round(s.projectedRemaining)}${product.unit}` : "―"} ／ 切れ予測 {fmtDateFull(s.stockoutDate)} ／ 1日 {s.usage.value ? s.usage.value.toFixed(2) : "―"}{product.unit}</span>
                       {upcoming && <span style={{ fontSize: 10, color: COLORS.steel, border: `1px solid ${COLORS.steel}77`, borderRadius: 3, padding: "2px 6px", whiteSpace: "nowrap" }}>{fmtDate(upcoming.date)}に納品予定あり</span>}
                     </div>
@@ -1055,7 +1088,7 @@ function WeeklyPlanView({ enrichedStocks, farms, productInfo, onUpdateVisitDate,
                   <div key={delivery.id} style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 12, padding: "7px 9px", background: COLORS.panelAlt, borderRadius: 5, flexWrap: "wrap" }}>
                     <div style={{ width: 128, fontWeight: 600 }}>{fmtDateFull(delivery.date)}{delivery.date === todayStr() ? "（本日）" : ""}</div>
                     <div style={{ minWidth: 110 }}>{farm?.name || "?"}</div>
-                    <div style={{ color: COLORS.textDim }}>{product.name}</div>
+                    <div style={{ color: COLORS.textDim }}><ProductChip name={product.name} /></div>
                     <div style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{delivery.quantity}{product.unit}</div>
                     <div style={{ fontSize: 11, color: COLORS.textDim, flex: 1 }}>納品前の予想残量: {before != null ? `${Math.round(before * 10) / 10}${product.unit}` : "―"}</div>
                     <button onClick={() => onDeletePlannedDelivery(stock.id, delivery.id)} style={{ background: "transparent", border: "none", color: COLORS.textDim, cursor: "pointer" }}><X size={13} /></button>
@@ -1065,7 +1098,9 @@ function WeeklyPlanView({ enrichedStocks, farms, productInfo, onUpdateVisitDate,
             </div>
             {weekTotalsByProduct.length > 0 && (
               <div style={{ fontSize: 11, color: COLORS.textDim, marginTop: 10 }}>
-                週の合計（積み込み目安）：{weekTotalsByProduct.map(([pid, qty]) => `${productInfo(pid).name} ${qty}${productInfo(pid).unit}`).join(" ／ ")}
+                週の合計（積み込み目安）：{weekTotalsByProduct.map(([pid, qty], idx) => (
+                  <span key={pid}>{idx > 0 && " ／ "}<ProductChip name={productInfo(pid).name} /> {qty}{productInfo(pid).unit}</span>
+                ))}
               </div>
             )}
           </>
@@ -1083,7 +1118,7 @@ function WeeklyPlanView({ enrichedStocks, farms, productInfo, onUpdateVisitDate,
                   <StatusBadge status={worstStatus} />
                   <div style={{ fontWeight: 600, fontSize: 13, minWidth: 110 }}>{farm.name}</div>
                   <div style={{ fontSize: 11, color: COLORS.textDim, flex: 1 }}>
-                    {items.map((i) => productInfo(i.productId).name).join("・")}
+                    {items.map((i, idx) => (<span key={i.id}>{idx > 0 && " "}<ProductChip name={productInfo(i.productId).name} /></span>))}
                     {earliestStockout && ` ／ 予測: ${fmtDateFull(earliestStockout)}`}
                   </div>
                   <div style={{ display: "flex", gap: 4 }}>
@@ -1115,7 +1150,7 @@ function WeeklyPlanView({ enrichedStocks, farms, productInfo, onUpdateVisitDate,
                       <span style={{ fontSize: 12, fontWeight: 600 }}>{farm.name}</span>
                       <StatusBadge status={worstStatus} />
                     </div>
-                    <div style={{ fontSize: 10, color: COLORS.textDim, marginTop: 2 }}>{farmItems.map((i) => productInfo(i.productId).name).join("・")}</div>
+                    <div style={{ fontSize: 10, color: COLORS.textDim, marginTop: 2 }}>{farmItems.map((i, idx) => (<span key={i.id}>{idx > 0 && " "}<ProductChip name={productInfo(i.productId).name} /></span>))}</div>
                     <button onClick={() => onUpdateVisitDate(farmId, "")} style={{ fontSize: 10, color: COLORS.textDim, background: "transparent", border: "none", cursor: "pointer", marginTop: 4, padding: 0 }}>未割当に戻す</button>
                   </div>
                 ))}
@@ -1157,7 +1192,7 @@ function DetailView({ stock, farmName, product, onBack, onAddLog, onDeleteLog, o
       <div style={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between", flexWrap: "wrap", gap: 10 }}>
         <div>
           <div style={{ fontSize: 12, color: COLORS.textDim }}>{farmName}</div>
-          <div style={{ fontFamily: "'Oswald', sans-serif", fontSize: 24, fontWeight: 600 }}>{product.name}</div>
+          <div style={{ fontFamily: "'Oswald', sans-serif", fontSize: 24, fontWeight: 600 }}><ProductChip name={product.name} large /></div>
         </div>
         <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
           <StatusBadge status={stock.status} />
@@ -1403,7 +1438,7 @@ function FarmsView({ data, enrichedStocks, onAddFarm, onAddFarmsBulk, onDeleteFa
                             const p = data.products.find((pp) => pp.id === s.productId);
                             return (
                               <div key={s.id} style={{ display: "flex", alignItems: "center", gap: 12, fontSize: 13 }}>
-                                <div style={{ width: 110 }}>{p?.name}</div>
+                                <div style={{ width: 110 }}><ProductChip name={p?.name || "?"} /></div>
                                 <div style={{ flex: 1 }}><Gauge_ daysLeft={s.daysLeft} status={s.status} /></div>
                                 <StatusBadge status={s.status} />
                                 <button onClick={() => onSelect(s.id)} style={{ background: "transparent", border: "none", color: COLORS.steel, cursor: "pointer", fontSize: 12 }}>詳細</button>
@@ -1557,7 +1592,7 @@ function ProductsView({ data, enrichedStocks, farmName, onAddProduct, onDeletePr
             <div key={p.id} style={{ background: COLORS.panel, border: `1px solid ${COLORS.border}`, borderRadius: 7, padding: "10px 14px" }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                 <div onClick={() => setOpenProductId(open ? null : p.id)} style={{ cursor: "pointer" }}>
-                  <span style={{ fontWeight: 600 }}>{p.name}</span> <span style={{ color: COLORS.textDim, fontSize: 12 }}>（単位: {p.unit}）</span>
+                  <ProductChip name={p.name} /> <span style={{ color: COLORS.textDim, fontSize: 12 }}>（単位: {p.unit}）</span>
                   <span style={{ color: COLORS.steel, fontSize: 12, marginLeft: 8 }}>{open ? "▲ 閉じる" : "▼ 分析を見る"}</span>
                 </div>
                 <Btn variant="danger" onClick={() => { if (confirm(`${p.name} を削除しますか？関連する在庫データも削除されます。`)) onDeleteProduct(p.id); }}><Trash2 size={13} /></Btn>
@@ -1655,7 +1690,7 @@ function AlertsView({ items, enrichedStocks, farmName, productInfo, leadDays, se
               <div key={d.id} onClick={() => onSelect(d.stockId)} style={{ display: "flex", alignItems: "center", gap: 16, fontSize: 13, cursor: "pointer", padding: "6px 0", borderBottom: `1px solid ${COLORS.border}44`, flexWrap: "wrap" }}>
                 <div style={{ width: 100, fontFamily: "'IBM Plex Mono', monospace" }}>{fmtDateFull(d.date)}</div>
                 <div style={{ width: 140 }}>{farmName(d.farmId)}</div>
-                <div style={{ flex: 1, color: COLORS.textDim }}>{productInfo(d.productId).name}</div>
+                <div style={{ flex: 1, color: COLORS.textDim }}><ProductChip name={productInfo(d.productId).name} /></div>
                 <div style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{d.quantity}{productInfo(d.productId).unit}</div>
               </div>
             ))}
@@ -1671,7 +1706,7 @@ function AlertsView({ items, enrichedStocks, farmName, productInfo, leadDays, se
             <div key={s.id} style={{ background: COLORS.panel, border: `1px solid ${COLORS.border}`, borderRadius: 7, padding: "12px 16px", display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
               <div style={{ width: 150 }}>
                 <div style={{ fontWeight: 600, fontSize: 14 }}>{farmName(s.farmId)}</div>
-                <div style={{ fontSize: 12, color: COLORS.textDim }}>{product.name}</div>
+                <div style={{ fontSize: 12, color: COLORS.textDim }}><ProductChip name={product.name} /></div>
               </div>
               <div style={{ flex: 1, minWidth: 120 }}><Gauge_ daysLeft={s.daysLeft} status={s.status} /></div>
               <div style={{ fontSize: 12, color: COLORS.textDim, width: 110 }}>予測: {s.stockoutDate ? fmtDateFull(s.stockoutDate) : "―"}</div>

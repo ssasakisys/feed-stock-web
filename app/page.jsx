@@ -1848,9 +1848,11 @@ function MapView() {
     if (zone === "全て" && !followOnly) {
       map.flyTo([42.92, 143.20], 9);
     } else if (targets.length === 1) {
-      map.flyTo([targets[0].lat, targets[0].lng], 11);
+      map.flyTo([targets[0].lat, targets[0].lng], 12);
     } else if (targets.length > 1) {
-      map.flyToBounds(window.L.latLngBounds(targets.map((t) => [t.lat, t.lng])), { padding: [36, 36], maxZoom: 11 });
+      const cLat = targets.reduce((s, t) => s + t.lat, 0) / targets.length;
+      const cLng = targets.reduce((s, t) => s + t.lng, 0) / targets.length;
+      map.flyTo([cLat, cLng], 11);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mapReady, zone, followOnly]);

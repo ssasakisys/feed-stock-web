@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import {
   LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, ReferenceDot,
@@ -8,9 +8,10 @@ import {
 import {
   Plus, Trash2, ChevronLeft, AlertTriangle, CalendarPlus,
   Warehouse, Package, X, Gauge, Download, Settings2, Home as HomeIcon,
-  GripVertical, TrendingUp, TrendingDown, CalendarCheck, FileDown, Check, CalendarDays, Search,
+  GripVertical, TrendingUp, TrendingDown, CalendarCheck, FileDown, Check, CalendarDays, Search, MapPin,
 } from "lucide-react";
 import { supabase } from "../lib/supabaseClient";
+import mapPinsData from "./map-pins.json";
 
 // 簡易パスコード保護: Vercelの環境変数 NEXT_PUBLIC_APP_PASSCODE が設定されている場合のみ有効。
 // 未設定なら従来どおり素通りする。あくまで簡易的な抑止であり、本格的な認証ではない。
@@ -678,7 +679,7 @@ export default function App() {
           </div>
         </div>
         <nav style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
-          {[["home", "ホーム", HomeIcon], ["weekly", "週間計画", CalendarDays], ["farms", "農家", Warehouse], ["products", "商品", Package], ["alerts", "アラート", AlertTriangle]].map(([key, label, Icon]) => (
+          {[["home", "ホーム", HomeIcon], ["weekly", "週間計画", CalendarDays], ["farms", "農家", Warehouse], ["products", "商品", Package], ["alerts", "アラート", AlertTriangle], ["map", "マップ", MapPin]].map(([key, label, Icon]) => (
             <button key={key} onClick={() => navigateTo(key)} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: "none", cursor: "pointer", padding: "8px 12px", borderRadius: 5, color: tab === key ? COLORS.text : COLORS.textDim, borderBottom: tab === key ? `2px solid ${COLORS.sage}` : "2px solid transparent", fontSize: 13, fontWeight: 500 }}>
               <Icon size={15} /> {label}
             </button>
@@ -726,6 +727,7 @@ export default function App() {
         {tab === "products" && (<ProductsView data={data} enrichedStocks={enrichedStocks} farmName={farmName} onAddProduct={addProduct} onDeleteProduct={deleteProduct} />)}
         {tab === "weekly" && (<WeeklyPlanView enrichedStocks={enrichedStocks} farms={data.farms} productInfo={productInfo} onUpdateVisitDate={updateFarmVisitDate} onAddPlannedDelivery={addPlannedDelivery} onDeletePlannedDelivery={deletePlannedDelivery} />)}
         {tab === "alerts" && (<AlertsView items={alertItems} enrichedStocks={enrichedStocks} farmName={farmName} productInfo={productInfo} leadDays={leadDays} setLeadDays={setLeadDays} onSelect={(id) => navigateTo("detail", id)} />)}
+        {tab === "map" && <MapView />}
       </div>
     </div>
   );
@@ -1716,6 +1718,168 @@ function AlertsView({ items, enrichedStocks, farmName, productInfo, leadDays, se
           );
         })}
       </div>
+    </div>
+  );
+}
+
+// ===== マップ（試作・読み取り専用）: app/map-pins.json のスナップショットを表示するだけ。Supabaseには触れない =====
+const MAP_ZONES = ["全て", "北十勝", "西十勝", "南十勝", "東十勝", "釧路方面"];
+const LEAFLET_CSS = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css";
+const LEAFLET_JS = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js";
+
+function loadLeaflet() {
+  if (typeof window === "undefined") return Promise.reject(new Error("no window"));
+  if (!document.querySelector(`link[href="${LEAFLET_CSS}"]`)) {
+    const link = document.createElement("link");
+    link.rel = "stylesheet";
+    link.href = LEAFLET_CSS;
+    document.head.appendChild(link);
+  }
+  if (window.L) return Promise.resolve(window.L);
+  return new Promise((resolve, reject) => {
+    let script = document.querySelector(`script[src="${LEAFLET_JS}"]`);
+    if (!script) {
+      script = document.createElement("script");
+      script.src = LEAFLET_JS;
+      script.async = true;
+      document.head.appendChild(script);
+    }
+    script.addEventListener("load", () => (window.L ? resolve(window.L) : reject(new Error("Leaflet not available"))));
+    script.addEventListener("error", () => reject(new Error("Leaflet load failed")));
+  });
+}
+
+function mapPinColor(f) {
+  if (f.followText) return "#E5484D";
+  if (f.stockAlert) return "#D9A544";
+  return "#5C7C99";
+}
+
+function MapChip({ active, onClick, children }) {
+  return (
+    <button onClick={onClick} style={{ background: active ? COLORS.steel : COLORS.panelAlt, color: active ? "#fff" : COLORS.textDim, border: `1px solid ${active ? COLORS.steel : COLORS.border}`, borderRadius: 14, padding: "5px 12px", fontSize: 12, fontWeight: 500, cursor: "pointer", fontFamily: "'IBM Plex Sans JP', sans-serif" }}>
+      {children}
+    </button>
+  );
+}
+
+function MapView() {
+  const allFarms = mapPinsData.farms || [];
+  const [zone, setZone] = useState("全て");
+  const [followOnly, setFollowOnly] = useState(false);
+  const [selectedFarm, setSelectedFarm] = useState(null);
+  const [mapReady, setMapReady] = useState(false);
+  const [loadError, setLoadError] = useState("");
+  const mapDivRef = useRef(null);
+  const mapRef = useRef(null);
+  const layerRef = useRef(null);
+
+  const visibleFarms = useMemo(
+    () => allFarms.filter((f) => (zone === "全て" || f.zone === zone) && (!followOnly || !!f.followText)),
+    [allFarms, zone, followOnly]
+  );
+
+  // Leaflet読み込み＋地図生成（1回だけ）。アンマウント時に地図を破棄する。
+  useEffect(() => {
+    let cancelled = false;
+    loadLeaflet()
+      .then((L) => {
+        if (cancelled || mapRef.current || !mapDivRef.current) return;
+        const map = L.map(mapDivRef.current).setView([42.92, 143.20], 9);
+        L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+          maxZoom: 19,
+          attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+        }).addTo(map);
+        layerRef.current = L.layerGroup().addTo(map);
+        mapRef.current = map;
+        setMapReady(true);
+      })
+      .catch(() => { if (!cancelled) setLoadError("地図ライブラリの読み込みに失敗しました。通信状況を確認してください。"); });
+    return () => {
+      cancelled = true;
+      if (mapRef.current) { mapRef.current.remove(); mapRef.current = null; }
+      layerRef.current = null;
+    };
+  }, []);
+
+  // フィルタ変更時はマーカーレイヤーだけ作り直す
+  useEffect(() => {
+    if (!mapReady || !layerRef.current || !window.L) return;
+    const L = window.L;
+    const layer = layerRef.current;
+    layer.clearLayers();
+    visibleFarms.forEach((f) => {
+      if (typeof f.lat !== "number" || typeof f.lng !== "number") return;
+      L.circleMarker([f.lat, f.lng], { radius: 8, color: "#FFFFFF", weight: 1, fillColor: mapPinColor(f), fillOpacity: 0.9 })
+        .on("click", () => setSelectedFarm(f))
+        .addTo(layer);
+    });
+  }, [mapReady, visibleFarms]);
+
+  // 絞り込みで非表示になった農家の詳細は閉じる
+  useEffect(() => {
+    if (selectedFarm && !visibleFarms.includes(selectedFarm)) setSelectedFarm(null);
+  }, [visibleFarms, selectedFarm]);
+
+  const f = selectedFarm;
+  const linkStyle = { display: "inline-flex", alignItems: "center", gap: 6, fontSize: 13, fontWeight: 500, padding: "7px 12px", borderRadius: 5, textDecoration: "none", background: COLORS.panelAlt, color: COLORS.text, border: `1px solid ${COLORS.border}` };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <div style={{ fontSize: 12, color: COLORS.textDim }}>
+        試作版（読み取り専用）：データは{mapPinsData.snapshot}時点のスナップショットです。編集はスペース版で行ってください。
+      </div>
+
+      <Panel title="絞り込み">
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          {MAP_ZONES.map((z) => (
+            <MapChip key={z} active={zone === z} onClick={() => setZone(z)}>{z}</MapChip>
+          ))}
+          <span style={{ width: 1, height: 20, background: COLORS.border, margin: "0 4px" }} />
+          <MapChip active={followOnly} onClick={() => setFollowOnly((v) => !v)}>フォローありのみ</MapChip>
+          <span style={{ marginLeft: "auto", fontSize: 13, color: COLORS.textDim, fontFamily: "'IBM Plex Mono', monospace" }}>
+            {visibleFarms.length} / {allFarms.length} 件
+          </span>
+        </div>
+        <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginTop: 10, fontSize: 11, color: COLORS.textDim }}>
+          {[["#E5484D", "フォローあり"], ["#D9A544", "在庫アラート"], ["#5C7C99", "その他"]].map(([c, label]) => (
+            <span key={label} style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+              <span style={{ width: 10, height: 10, borderRadius: "50%", background: c, border: "1px solid #fff" }} />{label}
+            </span>
+          ))}
+        </div>
+      </Panel>
+
+      {loadError && <div style={{ color: COLORS.rust, fontSize: 12 }}>{loadError}</div>}
+      <div style={{ position: "relative", zIndex: 0 }}>
+        <div ref={mapDivRef} style={{ height: "55vh", borderRadius: 8, border: `1px solid ${COLORS.border}`, background: COLORS.panelAlt, overflow: "hidden" }} />
+      </div>
+
+      {f ? (
+        <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.border}`, borderRadius: 7, padding: 16, display: "flex", flexDirection: "column", gap: 6 }}>
+          <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 8 }}>
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 16 }}>{f.name}</div>
+              <div style={{ fontSize: 12, color: COLORS.textDim }}>{[f.zone, f.area].filter(Boolean).join(" / ")}</div>
+            </div>
+            <button onClick={() => setSelectedFarm(null)} aria-label="閉じる" style={{ background: "transparent", border: "none", color: COLORS.textDim, cursor: "pointer", padding: 2 }}><X size={16} /></button>
+          </div>
+          <div style={{ fontSize: 13 }}><span style={{ color: COLORS.textDim }}>最終訪問：</span>{f.lastVisit || "未記録"}</div>
+          {f.followText && (
+            <div style={{ fontSize: 13, color: "#F08A8D" }}>
+              フォロー：{f.followText}{f.followDue ? `（期限 ${f.followDue}）` : ""}
+            </div>
+          )}
+          {f.stockText && <div style={{ fontSize: 13, color: f.stockAlert ? COLORS.amber : COLORS.text }}><span style={{ color: COLORS.textDim }}>在庫：</span>{f.stockText}</div>}
+          {f.note && <div style={{ fontSize: 13 }}><span style={{ color: COLORS.textDim }}>メモ：</span>{f.note}</div>}
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 6 }}>
+            <a href={`https://www.google.com/maps/search/?api=1&query=${f.lat},${f.lng}`} target="_blank" rel="noreferrer" style={linkStyle}><MapPin size={13} /> Googleマップで開く</a>
+            <a href={`https://www.google.com/maps/dir/?api=1&destination=${f.lat},${f.lng}`} target="_blank" rel="noreferrer" style={linkStyle}>経路</a>
+          </div>
+        </div>
+      ) : (
+        <Empty text="ピンをタップすると農家の詳細を表示します" />
+      )}
     </div>
   );
 }

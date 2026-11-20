@@ -58,7 +58,8 @@ function ProductChip({ name, large }) {
 }
 
 function uid() { return Math.random().toString(36).slice(2, 10); }
-function todayStr() { return new Date().toISOString().slice(0, 10); }
+function toLocalDateStr(date) { return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`; }
+function todayStr() { return toLocalDateStr(new Date()); }
 function daysBetween(d1, d2) { return Math.round((new Date(d2) - new Date(d1)) / 86400000); }
 function fmtDate(d) { const dt = new Date(d); return `${dt.getMonth() + 1}/${dt.getDate()}`; }
 function fmtDateFull(d) { const dt = new Date(d); return `${dt.getFullYear()}/${dt.getMonth() + 1}/${dt.getDate()}`; }
@@ -70,12 +71,12 @@ function getMondayOf(dateStr) {
   const day = d.getDay();
   const diff = day === 0 ? -6 : 1 - day;
   d.setDate(d.getDate() + diff);
-  return d.toISOString().slice(0, 10);
+  return toLocalDateStr(d);
 }
 function addDaysStr(dateStr, n) {
   const d = new Date(dateStr);
   d.setDate(d.getDate() + n);
-  return d.toISOString().slice(0, 10);
+  return toLocalDateStr(d);
 }
 function getSundayOf(dateStr) { return addDaysStr(getMondayOf(dateStr), 6); }
 
@@ -123,7 +124,7 @@ function stockoutDateWithRate(stock, rate) {
     if (usedUntilDelivery >= remaining) {
       const out = new Date(cursor);
       out.setDate(out.getDate() + Math.floor(remaining / rate));
-      return out.toISOString().slice(0, 10);
+      return toLocalDateStr(out);
     }
     remaining -= usedUntilDelivery;
     remaining += Number(d.quantity) || 0;
@@ -131,7 +132,7 @@ function stockoutDateWithRate(stock, rate) {
   }
   const out = new Date(cursor);
   out.setDate(out.getDate() + Math.floor(remaining / rate));
-  return out.toISOString().slice(0, 10);
+  return toLocalDateStr(out);
 }
 
 function computeStockoutDate(stock) {
@@ -231,7 +232,7 @@ function gcalUrl(title, dateStr, details) {
   const d = new Date(dateStr);
   const end = new Date(d);
   end.setDate(end.getDate() + 1);
-  const fmt = (dt) => dt.toISOString().slice(0, 10).replace(/-/g, "");
+  const fmt = (dt) => toLocalDateStr(dt).replace(/-/g, "");
   const params = new URLSearchParams({ action: "TEMPLATE", text: title, dates: `${fmt(d)}/${fmt(end)}`, details: details || "" });
   return `https://calendar.google.com/calendar/render?${params.toString()}`;
 }
@@ -1670,7 +1671,7 @@ function AlertsView({ items, enrichedStocks, farmName, productInfo, leadDays, se
     const icsItems = urgentForCalendar.map((s) => {
       const alertDate = new Date(s.stockoutDate);
       alertDate.setDate(alertDate.getDate() - leadDays);
-      const useDate = alertDate < new Date() ? s.stockoutDate : alertDate.toISOString().slice(0, 10);
+      const useDate = alertDate < new Date() ? s.stockoutDate : toLocalDateStr(alertDate);
       return { alertDate: useDate, title: `【在庫アラート】${farmName(s.farmId)} / ${productInfo(s.productId).name}`, details: `在庫切れ予測日: ${fmtDateFull(s.stockoutDate)}` };
     });
     if (icsItems.length === 0) return;

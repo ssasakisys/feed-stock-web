@@ -80,6 +80,60 @@ function addDaysStr(dateStr, n) {
 }
 function getSundayOf(dateStr) { return addDaysStr(getMondayOf(dateStr), 6); }
 
+// ---- オフライン対応: データキャッシュと未送信キュー（localStorage） ----
+const CACHE_KEY = "fsg_cache_v1";
+const QUEUE_KEY = "fsg_queue_v1";
+
+function isOffline() { return typeof navigator !== "undefined" && navigator.onLine === false; }
+function isNetworkError(err) {
+  const msg = String((err && err.message) || err || "");
+  return /fetch|network|load failed/i.test(msg);
+}
+function loadCache() {
+  try {
+    const raw = localStorage.getItem(CACHE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || !parsed.data) return null;
+    return parsed;
+  } catch (e) { return null; }
+}
+function saveCache(dataObj) {
+  try { localStorage.setItem(CACHE_KEY, JSON.stringify({ savedAt: Date.now(), data: dataObj })); } catch (e) { /* 保存失敗は無視 */ }
+}
+function loadQueue() {
+  try {
+    const raw = localStorage.getItem(QUEUE_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (e) { return []; }
+}
+function writeQueue(ops) {
+  try { localStorage.setItem(QUEUE_KEY, JSON.stringify(ops)); } catch (e) { /* 保存失敗は無視 */ }
+}
+function applyOp(dataObj, op) {
+  if (!dataObj || !op) return dataObj;
+  return {
+    ...dataObj,
+    stocks: (dataObj.stocks || []).map((s) => {
+      if (s.id !== op.stock_id) return s;
+      if (op.type === "log") {
+        const logs = s.logs || [];
+        if (logs.some((l) => l.id === op.tempId)) return s;
+        return { ...s, logs: [...logs, { id: op.tempId, stock_id: op.stock_id, date: op.date, remaining: op.remaining }] };
+      }
+      if (op.type === "planned") return { ...s, planned_deliveries: op.planned_deliveries || [] };
+      if (op.type === "manual") return { ...s, use_manual: op.use_manual, manual_daily_usage: op.manual_daily_usage };
+      return s;
+    }),
+  };
+}
+function applyOps(dataObj, ops) { return (ops || []).reduce((d, op) => applyOp(d, op), dataObj); }
+function fmtSavedAt(ms) {
+  const dt = new Date(ms);
+  return `${dt.getMonth() + 1}月${dt.getDate()}日 ${String(dt.getHours()).padStart(2, "0")}:${String(dt.getMinutes()).padStart(2, "0")}`;
+}
+
 function computeDailyUsage(stock) {
   if (stock.use_manual && stock.manual_daily_usage != null && stock.manual_daily_usage > 0) {
     return { value: stock.manual_daily_usage, source: "manual" };
@@ -437,6 +491,32 @@ export default function App() {
   const [error, setError] = useState(null);
   const [unlocked, setUnlocked] = useState(() => typeof window !== "undefined" && sessionStorage.getItem("fsg_unlocked") === "1");
 
+  // ---- オフライン対応の状態 ----
+  const [netOnline, setNetOnline] = useState(() => (typeof navigator === "undefined" ? true : navigator.onLine !== false));
+  const [cacheSavedAt, setCacheSavedAt] = useState(null);
+  const [pendingOps, setPendingOps] = useState([]);
+  const pendingOpsRef = useRef([]);
+  const flushingRef = useRef(false);
+  const flushQueueRef = useRef(null);
+  const cacheModeRef = useRef(false);
+
+  // state・ref・localStorage を常に一致させる
+  const saveQueue = useCallback((ops) => {
+    pendingOpsRef.current = ops;
+    setPendingOps(ops);
+    writeQueue(ops);
+  }, []);
+  const enqueue = useCallback((...ops) => {
+    saveQueue([...pendingOpsRef.current, ...ops]);
+  }, [saveQueue]);
+
+  // 起動時に未送信キューを復元（refresh より先に実行される）
+  useEffect(() => {
+    const q = loadQueue();
+    pendingOpsRef.current = q;
+    setPendingOps(q);
+  }, []);
+
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
@@ -448,19 +528,93 @@ export default function App() {
       if (farmsRes.error) throw farmsRes.error;
       if (productsRes.error) throw productsRes.error;
       if (stocksRes.error) throw stocksRes.error;
-      setData({
+      const fresh = {
         farms: farmsRes.data || [],
         products: productsRes.data || [],
         stocks: (stocksRes.data || []).map((s) => ({ ...s, planned_deliveries: s.planned_deliveries || [] })),
-      });
+      };
+      saveCache(fresh);
+      setData(pendingOpsRef.current.length > 0 ? applyOps(fresh, pendingOpsRef.current) : fresh);
+      cacheModeRef.current = false;
+      setCacheSavedAt(null);
       setError(null);
+      if (pendingOpsRef.current.length > 0 && !flushingRef.current && flushQueueRef.current) {
+        flushQueueRef.current();
+      }
     } catch (e) {
-      setError("データ取得エラー: " + e.message);
+      const cached = loadCache();
+      if (cached) {
+        setData(applyOps(cached.data, pendingOpsRef.current));
+        cacheModeRef.current = true;
+        setCacheSavedAt(cached.savedAt || Date.now());
+        setError(null);
+      } else {
+        setError("データ取得エラー: " + e.message);
+      }
     }
     setLoading(false);
   }, []);
 
+  const flushQueue = useCallback(async () => {
+    if (flushingRef.current) return;
+    if (isOffline()) return;
+    if (pendingOpsRef.current.length === 0) return;
+    flushingRef.current = true;
+    let allOk = true;
+    try {
+      while (pendingOpsRef.current.length > 0) {
+        const op = pendingOpsRef.current[0];
+        let res;
+        try {
+          if (op.type === "log") {
+            res = await supabase.from("logs").insert({ stock_id: op.stock_id, date: op.date, remaining: Number(op.remaining) });
+          } else if (op.type === "planned") {
+            res = await supabase.from("stocks").update({ planned_deliveries: op.planned_deliveries }).eq("id", op.stock_id);
+          } else if (op.type === "manual") {
+            res = await supabase.from("stocks").update({ use_manual: op.use_manual, manual_daily_usage: op.manual_daily_usage }).eq("id", op.stock_id);
+          } else {
+            res = { error: null }; // 不明なオプは破棄
+          }
+        } catch (e) {
+          res = { error: e };
+        }
+        if (res && res.error) { allOk = false; break; }
+        // 送信中にキューが変化しても、送信済みのオプだけを取り除く
+        saveQueue(pendingOpsRef.current.filter((o) => o !== op));
+      }
+    } finally {
+      flushingRef.current = false;
+    }
+    if (allOk) await refresh();
+  }, [refresh, saveQueue]);
+  flushQueueRef.current = flushQueue;
+
   useEffect(() => { refresh(); }, [refresh]);
+
+  // ネットワーク状態の監視。復帰時に未送信キューを送信（なければキャッシュ表示を解除するため再取得）
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const handleOnline = () => {
+      setNetOnline(true);
+      if (pendingOpsRef.current.length > 0) flushQueueRef.current && flushQueueRef.current();
+      else if (cacheModeRef.current) refresh();
+    };
+    const handleOffline = () => setNetOnline(false);
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+    return () => {
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+    };
+  }, [refresh]);
+
+  // Service Worker 登録（失敗は握りつぶす）
+  useEffect(() => {
+    try {
+      if (typeof navigator === "undefined" || !("serviceWorker" in navigator)) return;
+      navigator.serviceWorker.register("/sw.js").catch(() => {});
+    } catch (e) { /* noop */ }
+  }, []);
 
   const farmName = (id) => data.farms.find((f) => f.id === id)?.name || "?";
   const productInfo = (id) => data.products.find((p) => p.id === id) || { name: "?", unit: "" };
@@ -497,7 +651,15 @@ export default function App() {
   }
 
   // ---- Actions ----
+  // オンライン専用の操作のガード
+  const requireOnline = () => {
+    if (isOffline()) { setError("この操作はオンラインのときのみ可能です"); return false; }
+    return true;
+  };
+  const newTempId = () => `tmp-${Date.now().toString(36)}-${uid()}`;
+
   const addFarm = async (name, note = "", region = "") => {
+    if (!requireOnline()) return;
     if (!name.trim()) return;
     const regionKey = region.trim();
     const maxOrder = data.farms.filter((f) => (f.region || "") === regionKey).reduce((m, f) => Math.max(m, f.order_num ?? 0), -1);
@@ -508,6 +670,7 @@ export default function App() {
   };
 
   const addFarmsBulk = async (list) => {
+    if (!requireOnline()) return;
     let added = 0, updated = 0;
     const orderCounters = {};
     data.farms.forEach((f) => { const r = f.region || ""; orderCounters[r] = Math.max(orderCounters[r] ?? -1, f.order_num ?? 0); });
@@ -539,6 +702,7 @@ export default function App() {
 
   // 農家を並び替える。newRegionが現在と異なる地域の場合は地域も変更する。
   const moveFarm = async (farmId, newRegion, insertBeforeId) => {
+    if (!requireOnline()) return;
     const regionFarms = data.farms
       .filter((f) => f.id !== farmId && (f.region || "") === newRegion)
       .sort((a, b) => (a.order_num ?? 0) - (b.order_num ?? 0));
@@ -557,6 +721,7 @@ export default function App() {
   };
 
   const deleteFarm = async (id) => {
+    if (!requireOnline()) return;
     const { error: err } = await supabase.from("farms").delete().eq("id", id);
     if (err) { setError("削除に失敗: " + err.message); return; }
     setError(null);
@@ -565,6 +730,7 @@ export default function App() {
   };
 
   const updateFarmVisitDate = async (farmId, date) => {
+    if (!requireOnline()) return;
     const { error: err } = await supabase.from("farms").update({ next_visit_date: date || null }).eq("id", farmId);
     if (err) { setError("訪問予定日の更新に失敗: " + err.message); return; }
     setError(null);
@@ -572,6 +738,7 @@ export default function App() {
   };
 
   const addProduct = async (name, unit) => {
+    if (!requireOnline()) return;
     if (!name.trim()) return;
     const { error: err } = await supabase.from("products").insert({ name: name.trim(), unit: unit.trim() || "個" });
     if (err) { setError("商品の追加に失敗: " + err.message); return; }
@@ -579,6 +746,7 @@ export default function App() {
     await refresh();
   };
   const deleteProduct = async (id) => {
+    if (!requireOnline()) return;
     const { error: err } = await supabase.from("products").delete().eq("id", id);
     if (err) { setError("削除に失敗: " + err.message); return; }
     setError(null);
@@ -586,6 +754,7 @@ export default function App() {
   };
 
   const addStock = async (farmIdVal, productId, initialRemaining, initialDate) => {
+    if (!requireOnline()) return;
     if (!farmIdVal || !productId) return;
     const { data: inserted, error } = await supabase.from("stocks").insert({ farm_id: farmIdVal, product_id: productId }).select().single();
     if (error) { setError("商品の割当に失敗: " + error.message); await refresh(); return; }
@@ -597,6 +766,7 @@ export default function App() {
     await refresh();
   };
   const deleteStock = async (id) => {
+    if (!requireOnline()) return;
     const { error: err } = await supabase.from("stocks").delete().eq("id", id);
     if (err) { setError("削除に失敗: " + err.message); return; }
     setError(null);
@@ -609,18 +779,41 @@ export default function App() {
   };
 
   const addLog = async (stockId, date, remaining) => {
-    const { error: err } = await supabase.from("logs").insert({ stock_id: stockId, date, remaining: Number(remaining) });
+    const queueLog = () => {
+      const op = { type: "log", stock_id: stockId, date, remaining: Number(remaining), tempId: newTempId() };
+      enqueue(op);
+      setData((d) => applyOp(d, op));
+    };
+    if (isOffline()) { queueLog(); return; }
+    let err;
+    try {
+      ({ error: err } = await supabase.from("logs").insert({ stock_id: stockId, date, remaining: Number(remaining) }));
+    } catch (e) { err = e; }
+    if (err && isNetworkError(err)) { queueLog(); return; }
     if (err) { setError("記録の追加に失敗: " + err.message); return; }
     setError(null);
     await refresh();
   };
   const deleteLog = async (logId) => {
+    if (typeof logId === "string" && logId.startsWith("tmp-")) {
+      // 未送信の楽観ログ: キューと表示から取り除くだけ（サーバーへは送らない）
+      saveQueue(pendingOpsRef.current.filter((o) => !(o.type === "log" && o.tempId === logId)));
+      setData((d) => ({ ...d, stocks: d.stocks.map((s) => ({ ...s, logs: (s.logs || []).filter((l) => l.id !== logId) })) }));
+      return;
+    }
+    if (!requireOnline()) return;
     const { error: err } = await supabase.from("logs").delete().eq("id", logId);
     if (err) { setError("削除に失敗: " + err.message); return; }
     setError(null);
     await refresh();
   };
   const updateManual = async (stockId, useManual, manualDailyUsage) => {
+    if (isOffline()) {
+      const op = { type: "manual", stock_id: stockId, use_manual: useManual, manual_daily_usage: manualDailyUsage };
+      enqueue(op);
+      setData((d) => applyOp(d, op));
+      return;
+    }
     const { error: err } = await supabase.from("stocks").update({ use_manual: useManual, manual_daily_usage: manualDailyUsage }).eq("id", stockId);
     if (err) { setError("設定の保存に失敗: " + err.message); return; }
     setError(null);
@@ -632,6 +825,12 @@ export default function App() {
     const stock = data.stocks.find((s) => s.id === stockId);
     if (!stock) return;
     const next = [...(stock.planned_deliveries || []), { id: uid(), date, quantity: Number(quantity) }];
+    if (isOffline()) {
+      const op = { type: "planned", stock_id: stockId, planned_deliveries: next };
+      enqueue(op);
+      setData((d) => applyOp(d, op));
+      return;
+    }
     const { error: err } = await supabase.from("stocks").update({ planned_deliveries: next }).eq("id", stockId);
     if (err) { setError("納品予定の追加に失敗: " + err.message); return; }
     setError(null);
@@ -641,6 +840,12 @@ export default function App() {
     const stock = data.stocks.find((s) => s.id === stockId);
     if (!stock) return;
     const next = (stock.planned_deliveries || []).filter((d) => d.id !== deliveryId);
+    if (isOffline()) {
+      const op = { type: "planned", stock_id: stockId, planned_deliveries: next };
+      enqueue(op);
+      setData((d) => applyOp(d, op));
+      return;
+    }
     const { error: err } = await supabase.from("stocks").update({ planned_deliveries: next }).eq("id", stockId);
     if (err) { setError("納品予定の削除に失敗: " + err.message); return; }
     setError(null);
@@ -653,9 +858,29 @@ export default function App() {
     const delivery = (stock.planned_deliveries || []).find((d) => d.id === deliveryId);
     if (!delivery) return;
     const nextDeliveries = stock.planned_deliveries.filter((d) => d.id !== deliveryId);
-    const { error: logErr } = await supabase.from("logs").insert({ stock_id: stockId, date: delivery.date, remaining: Number(actualRemaining) });
+    const logOp = { type: "log", stock_id: stockId, date: delivery.date, remaining: Number(actualRemaining), tempId: newTempId() };
+    const plannedOp = { type: "planned", stock_id: stockId, planned_deliveries: nextDeliveries };
+    const queueBoth = () => {
+      enqueue(logOp, plannedOp);
+      setData((d) => applyOps(d, [logOp, plannedOp]));
+    };
+    if (isOffline()) { queueBoth(); return; }
+    let logErr;
+    try {
+      ({ error: logErr } = await supabase.from("logs").insert({ stock_id: stockId, date: delivery.date, remaining: Number(actualRemaining) }));
+    } catch (e) { logErr = e; }
+    if (logErr && isNetworkError(logErr)) { queueBoth(); return; }
     if (logErr) { setError("記録の追加に失敗: " + logErr.message); return; }
-    const { error: updErr } = await supabase.from("stocks").update({ planned_deliveries: nextDeliveries }).eq("id", stockId);
+    let updErr;
+    try {
+      ({ error: updErr } = await supabase.from("stocks").update({ planned_deliveries: nextDeliveries }).eq("id", stockId));
+    } catch (e) { updErr = e; }
+    if (updErr && isNetworkError(updErr)) {
+      // ログは送信済みなので、納品予定の更新だけをキューに積む（ログは表示のみ反映）
+      enqueue(plannedOp);
+      setData((d) => applyOps(d, [logOp, plannedOp]));
+      return;
+    }
     if (updErr) { setError("納品予定の更新に失敗: " + updErr.message); return; }
     setError(null);
     await refresh();
@@ -689,6 +914,16 @@ export default function App() {
       </div>
 
       <div style={{ padding: 20, maxWidth: 1100, margin: "0 auto" }}>
+        {cacheSavedAt != null && (
+          <div style={{ background: COLORS.panelAlt, border: `1px solid ${COLORS.border}`, borderRadius: 5, color: COLORS.amber, fontSize: 12, padding: "6px 10px", marginBottom: 8 }}>
+            オフライン：{fmtSavedAt(cacheSavedAt)} 時点のデータを表示中
+          </div>
+        )}
+        {pendingOps.length > 0 && (
+          <div style={{ background: COLORS.panelAlt, border: `1px solid ${COLORS.border}`, borderRadius: 5, color: COLORS.textDim, fontSize: 12, padding: "6px 10px", marginBottom: 8 }}>
+            未送信の記録 {pendingOps.length} 件（電波が戻ると自動で送信されます）
+          </div>
+        )}
         {error && <div style={{ color: COLORS.rust, fontSize: 12, marginBottom: 10 }}>{error}</div>}
         {loading && <div style={{ color: COLORS.textDim, fontSize: 12, marginBottom: 10 }}>読み込み中...</div>}
         {tab !== "detail" && history.length > 0 && (

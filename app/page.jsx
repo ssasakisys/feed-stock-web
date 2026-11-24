@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import {
   LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
-  ResponsiveContainer, ReferenceDot,
+  ResponsiveContainer, ReferenceDot, Legend,
 } from "recharts";
 import {
   Plus, Trash2, ChevronLeft, AlertTriangle, CalendarPlus,
@@ -337,13 +337,33 @@ function Gauge_({ daysLeft, status }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 4, minWidth: 120 }}>
       <div style={{ position: "relative", height: 10, borderRadius: 3, background: "#11151B", border: `1px solid ${COLORS.border}`, overflow: "hidden" }}>
-        <div style={{ position: "absolute", inset: 0, width: `${pct}%`, background: color, transition: "width 0.4s ease" }} />
+        <div style={{ position: "absolute", inset: 0, width: `${pct}%`, background: color, transition: "width 0.9s ease" }} />
         {[25, 50, 75].map((t) => (<div key={t} style={{ position: "absolute", left: `${t}%`, top: 0, bottom: 0, width: 1, background: "rgba(0,0,0,0.35)" }} />))}
       </div>
       <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, color, fontWeight: 600 }}>
         {daysLeft == null ? "残日数 ―" : `残り ${Math.floor(daysLeft)}日`}
       </div>
     </div>
+  );
+}
+
+function Sparkline({ logs, color, width = 96, height = 26 }) {
+  const pts = (logs || []).slice(-12);
+  if (pts.length < 2) return null;
+  const values = pts.map((l) => Number(l.remaining));
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const pad = 2;
+  const innerH = height - pad * 2;
+  const points = values.map((v, i) => {
+    const x = (i / (values.length - 1)) * width;
+    const y = max === min ? height / 2 : pad + (1 - (v - min) / (max - min)) * innerH;
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(" ");
+  return (
+    <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} style={{ display: "block" }}>
+      <polyline points={points} fill="none" stroke={color} strokeWidth={1.5} strokeLinejoin="round" strokeLinecap="round" />
+    </svg>
   );
 }
 
@@ -1025,6 +1045,7 @@ function HomeView({ enrichedStocks, farmName, productInfo, filterStatus, setFilt
               </div>
               <div style={{ flex: 1, minWidth: 130 }}>
                 <Gauge_ daysLeft={s.daysLeft} status={s.status} />
+                <Sparkline logs={sortedLogs(s)} color={productColor(productInfo(s.productId).name)} />
                 {s.stockoutDate && (
                   <div style={{ fontSize: 10, color: needsThisWeekIds.has(s.id) ? COLORS.amber : COLORS.textDim, marginTop: 3, fontWeight: needsThisWeekIds.has(s.id) ? 600 : 400 }}>
                     予測: {fmtDateWeekday(s.stockoutDate)}
@@ -1409,8 +1430,22 @@ function DetailView({ stock, farmName, product, onBack, onAddLog, onDeleteLog, o
 
   const logs = sortedLogs(stock);
   const projectedToday = projectRemainingOnDate(stock, todayStr());
-  const chartData = logs.map((l) => ({ date: fmtDate(l.date), remaining: l.remaining }));
-  if (stock.stockoutDate) chartData.push({ date: fmtDate(stock.stockoutDate), remaining: 0 });
+  const [chartRange, setChartRange] = useState("90d");
+  const today = todayStr();
+  const recentLogs = logs.filter((l) => daysBetween(l.date, today) <= 90);
+  const chartLogs = chartRange === "90d" && recentLogs.length >= 2 ? recentLogs : logs;
+  const chartRows = {};
+  const chartRow = (iso) => (chartRows[iso] = chartRows[iso] || { iso, date: fmtDate(iso), actual: null, forecast: null });
+  chartLogs.forEach((l) => { chartRow(l.date).actual = l.remaining; });
+  const lastChartLog = chartLogs[chartLogs.length - 1];
+  if (lastChartLog) {
+    chartRow(lastChartLog.date).forecast = lastChartLog.remaining;
+    if (projectedToday != null && today > lastChartLog.date) chartRow(today).forecast = projectedToday;
+  }
+  if (stock.stockoutDate) chartRow(stock.stockoutDate).forecast = 0;
+  const chartData = Object.values(chartRows)
+    .sort((a, b) => (a.iso < b.iso ? -1 : a.iso > b.iso ? 1 : 0))
+    .map(({ date, actual, forecast }) => ({ date, actual, forecast }));
 
   const submitLog = () => { if (remaining === "" || isNaN(Number(remaining))) return; onAddLog(stock.id, date, remaining); setRemaining(""); };
   const submitManual = () => onUpdateManual(stock.id, useManual, manualInput === "" ? null : Number(manualInput));
@@ -1444,24 +1479,34 @@ function DetailView({ stock, farmName, product, onBack, onAddLog, onDeleteLog, o
         <StatCard label="月あたりの使用量" value={stock.usage.value ? `${(stock.usage.value * 30).toFixed(1)}${product.unit}` : "―"} color={stock.usage.source === "manual" ? COLORS.steel : COLORS.text} />
         <StatCard label="在庫切れ予測日" value={stock.stockoutDate ? fmtDateFull(stock.stockoutDate) : "―"} color={STATUS_COLOR[stock.status]} />
       </div>
+      <Gauge_ daysLeft={stock.daysLeft} status={stock.status} />
       {stock.trend?.direction && (
         <div style={{ fontSize: 12, color: COLORS.textDim, marginTop: -10 }}>
           前回の使用量 {stock.trend.previous.toFixed(2)}{product.unit}/日 → 今回 {stock.trend.current.toFixed(2)}{product.unit}/日
           （{stock.trend.direction === "up" ? "増加" : "減少"}。{stock.trend.direction === "down" ? "頭数減少や離反の可能性があるので訪問時に確認をおすすめします。" : "増頭など追加提案のチャンスかもしれません。"}）
         </div>
       )}
-      {chartData.length >= 2 && (
-        <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.border}`, borderRadius: 7, padding: 14, height: 220 }}>
-          <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={chartData}>
-              <CartesianGrid stroke={COLORS.border} strokeDasharray="3 3" />
-              <XAxis dataKey="date" stroke={COLORS.textDim} tick={{ fontSize: 11 }} />
-              <YAxis stroke={COLORS.textDim} tick={{ fontSize: 11 }} />
-              <Tooltip contentStyle={{ background: COLORS.panelAlt, border: `1px solid ${COLORS.border}`, fontSize: 12 }} />
-              <Line type="monotone" dataKey="remaining" stroke={COLORS.sage} strokeWidth={2} dot={{ r: 3 }} />
-              {stock.stockoutDate && <ReferenceDot x={fmtDate(stock.stockoutDate)} y={0} r={5} fill={COLORS.rust} stroke="none" />}
-            </LineChart>
-          </ResponsiveContainer>
+      {chartLogs.length >= 2 && (
+        <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.border}`, borderRadius: 7, padding: 14, height: 220, display: "flex", flexDirection: "column", gap: 6 }}>
+          <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
+            {[["90d", "直近90日"], ["all", "全期間"]].map(([k, label]) => (
+              <button key={k} onClick={() => setChartRange(k)} style={{ fontSize: 11, padding: "3px 8px", borderRadius: 4, cursor: "pointer", background: chartRange === k ? COLORS.panelAlt : "transparent", border: `1px solid ${COLORS.border}`, color: COLORS.textDim }}>{label}</button>
+            ))}
+          </div>
+          <div style={{ flex: 1, minHeight: 0 }}>
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={chartData}>
+                <CartesianGrid stroke={COLORS.border} strokeDasharray="3 3" />
+                <XAxis dataKey="date" stroke={COLORS.textDim} tick={{ fontSize: 11 }} />
+                <YAxis stroke={COLORS.textDim} tick={{ fontSize: 11 }} />
+                <Tooltip contentStyle={{ background: COLORS.panelAlt, border: `1px solid ${COLORS.border}`, fontSize: 12 }} />
+                <Legend wrapperStyle={{ fontSize: 11 }} />
+                <Line type="monotone" dataKey="actual" name="実績" stroke={productColor(product.name)} strokeWidth={2} dot={{ r: 3 }} connectNulls />
+                <Line type="monotone" dataKey="forecast" name="予測" stroke={STATUS_COLOR[stock.status]} strokeWidth={2} strokeDasharray="5 4" dot={false} connectNulls />
+                {stock.stockoutDate && <ReferenceDot x={fmtDate(stock.stockoutDate)} y={0} r={5} fill={COLORS.rust} stroke="none" />}
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
         </div>
       )}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>

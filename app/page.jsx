@@ -272,6 +272,13 @@ function projectRemainingOnDate(stock, dateStr) {
   return Math.max(0, latest.remaining - usage.value * daysSince + delivered);
 }
 
+function qtyThresholdFor(product) {
+  if (!product) return null;
+  if ((product.name || "").includes("セサミ")) return 1000;
+  if (product.unit === "個") return 2;
+  return null;
+}
+
 function getStatus(daysLeft) {
   if (daysLeft == null) return "unknown";
   if (daysLeft <= 3) return "critical";
@@ -377,6 +384,15 @@ function TrendBadge({ trend }) {
   return (
     <span title={`前回比 ${isUp ? "+" : "-"}${pct}%`} style={{ display: "inline-flex", alignItems: "center", gap: 4, fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, fontWeight: 600, padding: "2px 6px", borderRadius: 3, border: `1px solid ${color}88`, color, background: `${color}14`, whiteSpace: "nowrap" }}>
       <Icon size={11} /> {label}
+    </span>
+  );
+}
+
+function QtyAlertBadge({ qtyValue, unit }) {
+  const color = COLORS.rust;
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, fontWeight: 600, padding: "2px 6px", borderRadius: 3, border: `1px solid ${color}88`, color, background: `${color}14`, whiteSpace: "nowrap" }}>
+      在庫わずか 残り約{Math.round(qtyValue)}{unit}
     </span>
   );
 }
@@ -650,21 +666,26 @@ export default function App() {
       const latest = logs[logs.length - 1];
       const projectedRemaining = projectRemainingOnDate(s, todayStr());
       const trend = computeUsageTrend(s);
-      return { ...s, farmId: s.farm_id, productId: s.product_id, daysLeft, status, usage, stockoutDate, earliestStockoutDate, latest, projectedRemaining, trend };
+      const product = data.products.find((p) => p.id === s.product_id);
+      const qtyThreshold = qtyThresholdFor(product);
+      const qtyValue = projectedRemaining != null ? projectedRemaining : (latest?.remaining ?? null);
+      const qtyAlert = qtyThreshold != null && qtyValue != null && qtyValue <= qtyThreshold;
+      return { ...s, farmId: s.farm_id, productId: s.product_id, daysLeft, status, usage, stockoutDate, earliestStockoutDate, latest, projectedRemaining, trend, qtyThreshold, qtyValue, qtyAlert };
     });
-  }, [data.stocks]);
+  }, [data.stocks, data.products]);
 
   const sortedByUrgency = useMemo(() => {
     const rank = { critical: 0, warning: 1, unknown: 2, ok: 3 };
+    const rankOf = (s) => (s.qtyAlert ? Math.min(rank[s.status], rank.warning) : rank[s.status]);
     return [...enrichedStocks].sort((a, b) => {
-      if (rank[a.status] !== rank[b.status]) return rank[a.status] - rank[b.status];
+      if (rankOf(a) !== rankOf(b)) return rankOf(a) - rankOf(b);
       if (a.daysLeft == null) return 1;
       if (b.daysLeft == null) return -1;
       return a.daysLeft - b.daysLeft;
     });
   }, [enrichedStocks]);
 
-  const alertItems = useMemo(() => sortedByUrgency.filter((s) => s.daysLeft != null && s.daysLeft <= leadDays + 7), [sortedByUrgency, leadDays]);
+  const alertItems = useMemo(() => sortedByUrgency.filter((s) => (s.daysLeft != null && s.daysLeft <= leadDays + 7) || s.qtyAlert), [sortedByUrgency, leadDays]);
 
   if (loading && data.farms.length === 0 && data.products.length === 0) {
     return <div style={{ minHeight: "100vh", background: COLORS.bg, color: COLORS.textDim, display: "flex", alignItems: "center", justifyContent: "center" }}>読み込み中...</div>;
@@ -1062,6 +1083,7 @@ function HomeView({ enrichedStocks, farmName, productInfo, filterStatus, setFilt
               </div>
               <div style={{ width: 90, display: "flex", flexDirection: "column", gap: 4, alignItems: "flex-start" }}>
                 <StatusBadge status={s.status} />
+                {s.qtyAlert && <QtyAlertBadge qtyValue={s.qtyValue} unit={productInfo(s.productId).unit} />}
                 <TrendBadge trend={s.trend} />
                 {needsThisWeekIds.has(s.id) && (
                   <span style={{ fontSize: 10, fontWeight: 600, color: COLORS.amber, border: `1px solid ${COLORS.amber}77`, borderRadius: 3, padding: "2px 6px", background: `${COLORS.amber}14`, whiteSpace: "nowrap" }}>今週配達</span>
@@ -1469,6 +1491,7 @@ function DetailView({ stock, farmName, product, onBack, onAddLog, onDeleteLog, o
         </div>
         <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
           <StatusBadge status={stock.status} />
+          {stock.qtyAlert && <QtyAlertBadge qtyValue={stock.qtyValue} unit={product.unit} />}
           <TrendBadge trend={stock.trend} />
         </div>
       </div>
